@@ -3,6 +3,9 @@ const nextConfig = {
   // Server Actions are enabled by default in Next.js 14.2+
   // Optimize compilation
   experimental: {
+    outputFileTracingIncludes: {
+      '/api/**/*': ['./node_modules/pdfkit/js/data/**/*'],
+    },
     // Reduce compilation time
     optimizePackageImports: ['lucide-react'],
     // Externalize puppeteer and chromium for serverless
