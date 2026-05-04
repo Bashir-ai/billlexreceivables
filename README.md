@@ -35,6 +35,17 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+### Share local dev (HTTPS tunnel)
+
+Default dev port is **3000**. To give testers a public URL, align NextAuth with the tunnel origin:
+
+```bash
+npm run tunnel:env -- --write-env-tunnel https://YOUR_TUNNEL_ORIGIN
+npm run dev:tunnel
+```
+
+`npm run tunnel:env --` also supports `--exports`, `--windows-cmd`, and `--powershell`. The receivables app under `receivables-spin-off/` uses port **3001** and has the same scripts plus [receivables-spin-off/docs/TUNNEL_DEV.md](receivables-spin-off/docs/TUNNEL_DEV.md).
+
 ## Tech Stack
 
 - Next.js 14+ (App Router)
@@ -43,3 +54,4 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 - NextAuth.js
 - Tailwind CSS
 - shadcn/ui components
+# billlexreceivables
