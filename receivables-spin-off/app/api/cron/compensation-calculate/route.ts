@@ -55,7 +55,7 @@ export async function GET(request: Request) {
             "x-internal-cron": "compensation-calculate",
             authorization: cronSecret ? `Bearer ${cronSecret}` : "",
           },
-          body: JSON.stringify({ year, month }),
+          body: JSON.stringify({ year, month, forceRecalculate: true }),
         })
 
         // This calls the same calculation logic as the admin endpoint.

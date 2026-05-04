@@ -183,7 +183,7 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
             <div>
               <Label className="text-sm text-gray-600">Type</Label>
               <p className="font-semibold">
-                {compensation.compensationType === "SALARY_BONUS" ? "Salary + Bonus" : "Percentage-Based"}
+                {compensation.compensationType === "SALARY_BONUS" ? "Salary + Bonus + Finder" : "Percentage-Based"}
               </p>
             </div>
             {compensation.compensationType === "SALARY_BONUS" && (

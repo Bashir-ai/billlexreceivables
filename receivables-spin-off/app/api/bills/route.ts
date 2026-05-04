@@ -7,12 +7,12 @@ import { z } from "zod"
 import { BillStatus } from "@prisma/client"
 import { generateInvoiceNumber } from "@/lib/invoice-number"
 import { parseLocalDate } from "@/lib/utils"
+import { createBillAttributionSnapshot, createBillAttributionSnapshotFromRows } from "@/lib/bill-attribution"
+import { apiRowsToBillAttributionInputs, billAttributionRowsApiSchema } from "@/lib/bill-attribution-api"
 
 const billSchema = z.object({
-  proposalId: z.string().optional(),
-  projectId: z.string().optional(),
-  clientId: z.string().optional(), // Now optional - can be linked to client or lead
-  leadId: z.string().optional(), // New: optional lead reference
+  clientId: z.string().optional(),
+  leadId: z.string().optional(),
   amount: z.number().min(0).optional(),
   subtotal: z.number().min(0).optional(),
   description: z.string().optional(),
@@ -22,8 +22,7 @@ const billSchema = z.object({
   discountPercent: z.number().min(0).max(100).optional().nullable(),
   discountAmount: z.number().min(0).optional().nullable(),
   dueDate: z.string().optional(),
-  timesheetEntryIds: z.array(z.string()).optional(),
-  chargeIds: z.array(z.string()).optional(),
+  attributionRows: billAttributionRowsApiSchema.optional(),
 })
 
 export async function GET(request: Request) {
@@ -37,7 +36,6 @@ export async function GET(request: Request) {
     const status = searchParams.get("status")
     const clientId = searchParams.get("clientId")
     const leadId = searchParams.get("leadId")
-    const projectId = searchParams.get("projectId")
     
     // Pagination parameters
     const page = parseInt(searchParams.get("page") || "1")
@@ -50,7 +48,7 @@ export async function GET(request: Request) {
     if (status) {
       // Support comma-separated status values and "outstanding"
       if (status === "OUTSTANDING") {
-        where.status = { not: "PAID" }
+        where.status = { notIn: ["PAID", "CANCELLED", "WRITTEN_OFF"] }
         where.dueDate = { lt: new Date() }
       } else {
         const statuses = status.split(",").map(s => s.trim())
@@ -63,7 +61,6 @@ export async function GET(request: Request) {
     }
     if (clientId) where.clientId = clientId
     if (leadId) where.leadId = leadId
-    if (projectId) where.projectId = projectId
     if (session.user.role === "CLIENT") {
       const client = await prisma.client.findFirst({
         where: { 
@@ -125,12 +122,6 @@ export async function GET(request: Request) {
             select: {
               id: true,
               title: true,
-            },
-          },
-          project: {
-            select: {
-              id: true,
-              name: true,
             },
           },
           creator: {
@@ -212,7 +203,6 @@ export async function POST(request: Request) {
       }
     }
 
-    // Fetch selected timesheet entries and charges if provided
     let itemsSubtotal = 0
     const billItemsToCreate: Array<{
       type: string
@@ -231,73 +221,7 @@ export async function POST(request: Request) {
       isManuallyEdited: boolean
     }> = []
 
-    if (validatedData.timesheetEntryIds && validatedData.timesheetEntryIds.length > 0) {
-      const timesheetEntries = await prisma.timesheetEntry.findMany({
-        where: {
-          id: { in: validatedData.timesheetEntryIds },
-          billed: false, // Safety check: only get unbilled items
-        },
-        include: {
-          user: {
-            select: {
-              id: true,
-            },
-          },
-        },
-      })
-
-      for (const entry of timesheetEntries) {
-        const amount = (entry.rate || 0) * entry.hours
-        itemsSubtotal += amount
-        billItemsToCreate.push({
-          type: "TIMESHEET",
-          description: entry.description || `Timesheet entry - ${entry.hours} hours`,
-          quantity: entry.hours,
-          rate: entry.rate,
-          unitPrice: entry.rate,
-          amount: amount,
-          personId: entry.userId,
-          timesheetEntryId: entry.id,
-          chargeId: null,
-          date: entry.date,
-          isCredit: false,
-          billedHours: entry.hours, // Initially same as timesheet hours
-          originalTimesheetEntryId: entry.id, // Track original entry
-          isManuallyEdited: false, // Not edited yet
-        })
-      }
-    }
-
-    if (validatedData.chargeIds && validatedData.chargeIds.length > 0) {
-      const charges = await prisma.projectCharge.findMany({
-        where: {
-          id: { in: validatedData.chargeIds },
-          billed: false, // Safety check: only get unbilled items
-        },
-      })
-
-      for (const charge of charges) {
-        itemsSubtotal += charge.amount
-        billItemsToCreate.push({
-          type: "CHARGE",
-          description: charge.description,
-          quantity: charge.quantity || 1,
-          rate: null,
-          unitPrice: charge.unitPrice || charge.amount,
-          amount: charge.amount,
-          personId: null,
-          timesheetEntryId: null,
-          chargeId: charge.id,
-          date: null,
-          isCredit: false,
-          billedHours: null, // Not applicable for charges
-          originalTimesheetEntryId: null, // Not applicable for charges
-          isManuallyEdited: false,
-        })
-      }
-    }
-
-    // Calculate subtotal: use items subtotal if items are selected, otherwise use provided subtotal
+    // CRM + receivables mode: invoices are created directly with manual amount/subtotal.
     let subtotal = itemsSubtotal > 0 ? itemsSubtotal : (validatedData.subtotal || validatedData.amount || 0)
     const taxInclusive = validatedData.taxInclusive || false
     const taxRate = validatedData.taxRate || null
@@ -336,20 +260,16 @@ export async function POST(request: Request) {
       finalAmount = validatedData.amount
     }
 
-    // Generate invoice number for invoices created from scratch (no proposal or project)
+    // Generate invoice number for direct invoice creation.
     let invoiceNumber: string | null = null
-    if (!validatedData.proposalId && !validatedData.projectId) {
+    invoiceNumber = await generateInvoiceNumber()
+
+    const existingInvoice = await prisma.bill.findUnique({
+      where: { invoiceNumber },
+    })
+    
+    if (existingInvoice) {
       invoiceNumber = await generateInvoiceNumber()
-      
-      // Check if invoice number already exists (shouldn't happen, but safety check)
-      const existingInvoice = await prisma.bill.findUnique({
-        where: { invoiceNumber },
-      })
-      
-      if (existingInvoice) {
-        // If exists, generate a new one (shouldn't happen with sequential numbers, but just in case)
-        invoiceNumber = await generateInvoiceNumber()
-      }
     }
 
     // Create bill with items in a transaction
@@ -357,8 +277,8 @@ export async function POST(request: Request) {
       // Create the bill
       const createdBill = await tx.bill.create({
         data: {
-          proposalId: validatedData.proposalId || null,
-          projectId: validatedData.projectId || null,
+          proposalId: null,
+          projectId: null,
           clientId: validatedData.clientId || null,
           leadId: validatedData.leadId || null,
           createdBy: session.user.id,
@@ -385,27 +305,21 @@ export async function POST(request: Request) {
         },
       })
 
-      // Mark timesheet entries as billed
-      if (validatedData.timesheetEntryIds && validatedData.timesheetEntryIds.length > 0) {
-        await tx.timesheetEntry.updateMany({
-          where: {
-            id: { in: validatedData.timesheetEntryIds },
-          },
-          data: {
-            billed: true,
-          },
+      if (validatedData.attributionRows && validatedData.attributionRows.length > 0) {
+        await createBillAttributionSnapshotFromRows({
+          tx,
+          billId: createdBill.id,
+          clientId: createdBill.clientId,
+          projectId: createdBill.projectId,
+          version: 1,
+          rows: apiRowsToBillAttributionInputs(validatedData.attributionRows),
         })
-      }
-
-      // Mark charges as billed
-      if (validatedData.chargeIds && validatedData.chargeIds.length > 0) {
-        await tx.projectCharge.updateMany({
-          where: {
-            id: { in: validatedData.chargeIds },
-          },
-          data: {
-            billed: true,
-          },
+      } else {
+        await createBillAttributionSnapshot({
+          tx,
+          billId: createdBill.id,
+          clientId: createdBill.clientId,
+          projectId: createdBill.projectId,
         })
       }
 

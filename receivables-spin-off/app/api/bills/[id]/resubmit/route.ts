@@ -3,13 +3,7 @@ import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
-import { z } from "zod"
-import { BillStatus, UserRole } from "@prisma/client"
-
-const resubmitSchema = z.object({
-  approverIds: z.array(z.string()).optional(),
-  approvalRequirement: z.enum(["ALL", "ANY", "MAJORITY"]).optional(),
-})
+import { BillStatus } from "@prisma/client"
 
 export async function POST(
   request: Request,
@@ -41,54 +35,23 @@ export async function POST(
       return NextResponse.json({ error: "Invoice not found" }, { status: 404 })
     }
 
-    if (invoice.status !== BillStatus.SUBMITTED) {
+    if (invoice.status !== BillStatus.SUBMITTED && invoice.status !== BillStatus.DRAFT) {
       return NextResponse.json(
-        { error: "Only submitted invoices can be resubmitted" },
+        { error: "Only draft or submitted invoices can be resubmitted" },
         { status: 400 }
       )
-    }
-
-    const body = await request.json()
-    const validatedData = resubmitSchema.parse(body)
-
-    const approverIds = validatedData.approverIds || []
-
-    // Delete existing approvals
-    await prisma.approval.deleteMany({
-      where: { billId: id },
-    })
-
-    // Validate approvers exist and are not clients
-    if (approverIds.length > 0) {
-      const approvers = await prisma.user.findMany({
-        where: {
-          id: { in: approverIds },
-          role: { not: UserRole.CLIENT },
-        },
-      })
-
-      if (approvers.length !== approverIds.length) {
-        return NextResponse.json(
-          { error: "One or more selected approvers are invalid" },
-          { status: 400 }
-        )
-      }
-
-      // Create new approval records for each approver
-      await prisma.approval.createMany({
-        data: approverIds.map(approverId => ({
-          billId: id,
-          approverId,
-          status: "PENDING",
-        })),
-        skipDuplicates: true,
-      })
     }
 
     // Update invoice with resubmission tracking
     const updatedInvoice = await prisma.bill.update({
       where: { id },
       data: {
+        status: BillStatus.APPROVED,
+        approvedAt: new Date(),
+        submittedAt: invoice.submittedAt || new Date(),
+        internalApprovalRequired: false,
+        internalApprovalsComplete: true,
+        requiredApproverIds: [],
         resubmittedAt: new Date(),
         resubmittedBy: session.user.id,
         resubmissionCount: invoice.resubmissionCount + 1,
@@ -96,29 +59,11 @@ export async function POST(
       include: {
         client: true,
         creator: true,
-        approvals: {
-          include: {
-            approver: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
       },
     })
 
     return NextResponse.json(updatedInvoice)
   } catch (error: any) {
-    if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: "Invalid input", details: error.errors },
-        { status: 400 }
-      )
-    }
-
     console.error("Error resubmitting invoice:", error)
     return NextResponse.json(
       { error: "Internal server error", message: error.message },

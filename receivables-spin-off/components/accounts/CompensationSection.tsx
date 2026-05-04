@@ -7,11 +7,11 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { formatCurrency, formatDate } from "@/lib/utils"
 import { Textarea } from "@/components/ui/textarea"
-import { Calendar, DollarSign, TrendingUp } from "lucide-react"
+import { Calendar, DollarSign, TrendingUp, Trash2 } from "lucide-react"
 
 interface Compensation {
   id: string
-  compensationType: "SALARY_BONUS" | "PERCENTAGE_BASED"
+  compensationType: "SALARY_BONUS" | "PERCENTAGE_BASED" | "SALARY_BONUS_FINDER_MANAGEMENT"
   baseSalary: number | null
   maxBonusMultiplier: number | null
   percentageType: "PROJECT_TOTAL" | "DIRECT_WORK" | "BOTH" | null
@@ -34,6 +34,18 @@ interface CompensationEntry {
   balance: number
   calculatedAt: string
   notes: string | null
+  transactions?: Array<{
+    id: string
+    amount: number
+    transactionDate: string
+    relatedType: string | null
+  }>
+}
+
+interface EntrySyncResult {
+  attemptedMonths: number
+  syncedMonths: Array<{ year: number; month: number }>
+  failedMonths: Array<{ year: number; month: number; reason: string }>
 }
 
 interface CompensationSectionProps {
@@ -48,6 +60,7 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
   const [entries, setEntries] = useState<CompensationEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [calculating, setCalculating] = useState(false)
+  const [recalculatingEntryId, setRecalculatingEntryId] = useState<string | null>(null)
   const [bonusMultiplier, setBonusMultiplier] = useState<string>("")
   const [calculateYear, setCalculateYear] = useState<number>(new Date().getFullYear())
   const [calculateMonth, setCalculateMonth] = useState<number>(new Date().getMonth() + 1)
@@ -59,6 +72,7 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
   const [payoutNotes, setPayoutNotes] = useState<string>("")
   const [payoutLoading, setPayoutLoading] = useState(false)
   const [payoutError, setPayoutError] = useState<string | null>(null)
+  const [syncResult, setSyncResult] = useState<EntrySyncResult | null>(null)
 
   useEffect(() => {
     fetchCompensation()
@@ -94,6 +108,7 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
       const response = await fetch(`/api/users/${userId}/compensation/entries?${params.toString()}`)
       const data = await response.json()
       setEntries(data.entries || [])
+      setSyncResult(data.sync || null)
     } catch (error) {
       console.error("Error fetching entries:", error)
     } finally {
@@ -113,6 +128,7 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
           year: calculateYear,
           month: calculateMonth,
           bonusMultiplier: bonusMultiplier ? parseFloat(bonusMultiplier) : null,
+          forceRecalculate: true,
         }),
       })
 
@@ -130,6 +146,33 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
       alert("Failed to calculate compensation")
     } finally {
       setCalculating(false)
+    }
+  }
+
+  const handleRecalculateEntry = async (entry: CompensationEntry) => {
+    try {
+      setRecalculatingEntryId(entry.id)
+      const response = await fetch(`/api/users/${userId}/compensation/calculate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          year: entry.periodYear,
+          month: entry.periodMonth,
+          bonusMultiplier: entry.bonusMultiplier ?? null,
+          forceRecalculate: true,
+        }),
+      })
+
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to recalculate month")
+      }
+
+      await fetchEntries()
+    } catch (error: any) {
+      alert(error?.message || "Failed to recalculate month")
+    } finally {
+      setRecalculatingEntryId(null)
     }
   }
 
@@ -174,6 +217,22 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
     }
   }
 
+  const handleDeleteEntry = async (entryId: string) => {
+    if (!confirm("Delete this compensation line and related transactions? This cannot be undone.")) return
+    try {
+      const response = await fetch(`/api/users/${userId}/compensation/entries/${entryId}`, {
+        method: "DELETE",
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to delete compensation line")
+      }
+      await fetchEntries()
+    } catch (error: any) {
+      alert(error?.message || "Failed to delete compensation line")
+    }
+  }
+
   if (loading) {
     return <div>Loading compensation data...</div>
   }
@@ -207,6 +266,11 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
 
   const selectedPayoutEntry =
     payoutEntryId ? entries.find((e) => e.id === payoutEntryId) || null : null
+  // Net matured should reflect currently outstanding payable amounts.
+  const maturedTotal = entries.reduce((sum, entry) => sum + Math.max(0, entry.balance), 0)
+  const reconciledTotal = entries.reduce((sum, entry) => sum + entry.totalPaid, 0)
+  const outstandingTotal = entries.reduce((sum, entry) => sum + Math.max(0, entry.balance), 0)
+  const advancedTotal = entries.reduce((sum, entry) => sum + Math.max(0, -entry.balance), 0)
 
   return (
     <div className="space-y-6">
@@ -236,7 +300,9 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
             <div>
               <Label className="text-sm text-gray-600">Type</Label>
               <p className="font-semibold">
-                {compensation.compensationType === "SALARY_BONUS" ? "Salary + Bonus" : "Percentage-Based"}
+                {compensation.compensationType === "SALARY_BONUS" && "Salary + Bonus + Finder"}
+                {compensation.compensationType === "PERCENTAGE_BASED" && "Percentage-Based"}
+                {compensation.compensationType === "SALARY_BONUS_FINDER_MANAGEMENT" && "Salary + Finder + Management"}
               </p>
             </div>
             {compensation.compensationType === "SALARY_BONUS" && (
@@ -282,6 +348,57 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
           </div>
         </CardContent>
       </Card>
+
+      {syncResult && syncResult.failedMonths.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardContent className="pt-6">
+            <p className="text-sm text-amber-800 font-medium">
+              Compensation sync completed with warnings for {syncResult.failedMonths.length} month(s).
+            </p>
+            <p className="text-xs text-amber-700 mt-1">
+              Failed months:{" "}
+              {syncResult.failedMonths
+                .map((row) => `${row.year}-${row.month.toString().padStart(2, "0")}`)
+                .join(", ")}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Matured (company owes employee)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-green-700">{formatCurrency(maturedTotal)}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Advanced (employee owes company)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-red-700">{formatCurrency(advancedTotal)}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Reconciled (paid/settled)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-blue-700">{formatCurrency(reconciledTotal)}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Outstanding balance</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-amber-700">{formatCurrency(outstandingTotal)}</div>
+          </CardContent>
+        </Card>
+      </div>
 
       {/* Calculate Compensation (Admin only) */}
       {isAdmin && compensation.compensationType === "SALARY_BONUS" && (
@@ -347,8 +464,9 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
           {entries.length === 0 ? (
             <p className="text-gray-500">No compensation entries found for the selected period.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b">
                     <th className="text-left p-2">Period</th>
@@ -361,9 +479,16 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
                     {compensation.compensationType === "PERCENTAGE_BASED" && (
                       <th className="text-right p-2">Percentage Earnings</th>
                     )}
+                    {compensation.compensationType === "SALARY_BONUS_FINDER_MANAGEMENT" && (
+                      <>
+                        <th className="text-right p-2">Base Salary</th>
+                        <th className="text-right p-2">Variable Amount</th>
+                      </>
+                    )}
                     <th className="text-right p-2">Total Earned</th>
                     <th className="text-right p-2">Total Paid</th>
                     <th className="text-right p-2">Balance</th>
+                    <th className="text-left p-2">Reconciled At</th>
                     <th className="text-left p-2">Calculated</th>
                     {isAdmin && <th className="text-left p-2">Actions</th>}
                   </tr>
@@ -389,110 +514,145 @@ export function CompensationSection({ userId, startDate, endDate, isAdmin }: Com
                       {compensation.compensationType === "PERCENTAGE_BASED" && (
                         <td className="text-right p-2">{formatCurrency(entry.percentageEarnings || 0)}</td>
                       )}
+                      {compensation.compensationType === "SALARY_BONUS_FINDER_MANAGEMENT" && (
+                        <>
+                          <td className="text-right p-2">{formatCurrency(entry.baseSalary || 0)}</td>
+                          <td className="text-right p-2">{formatCurrency((entry.bonusAmount || 0) + (entry.percentageEarnings || 0))}</td>
+                        </>
+                      )}
                       <td className="text-right p-2 font-semibold">{formatCurrency(entry.totalEarned)}</td>
                       <td className="text-right p-2">{formatCurrency(entry.totalPaid)}</td>
                       <td className={`text-right p-2 font-semibold ${entry.balance >= 0 ? "text-green-600" : "text-red-600"}`}>
                         {formatCurrency(entry.balance)}
                       </td>
                       <td className="text-left p-2 text-xs text-gray-500">
+                        {(() => {
+                          const lastReconciledAt = entry.transactions
+                            ?.filter((tx) => tx.amount < 0)
+                            .map((tx) => new Date(tx.transactionDate))
+                            .sort((a, b) => b.getTime() - a.getTime())[0]
+                          return lastReconciledAt ? formatDate(lastReconciledAt) : "-"
+                        })()}
+                      </td>
+                      <td className="text-left p-2 text-xs text-gray-500">
                         {formatDate(entry.calculatedAt)}
                       </td>
                       {isAdmin && (
                         <td className="p-2">
-                          {entry.balance > 0 && (
+                          <div className="flex gap-2">
+                            {entry.balance > 0 && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setPayoutEntryId(entry.id)
+                                  setPayoutAmount(entry.balance.toString())
+                                  setPayoutDate(new Date().toISOString().split("T")[0])
+                                  setPayoutNotes("")
+                                  setPayoutError(null)
+                                }}
+                              >
+                                Record Payout
+                              </Button>
+                            )}
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => {
-                                setPayoutEntryId(entry.id)
-                                setPayoutAmount(entry.balance.toString())
-                                setPayoutDate(new Date().toISOString().split("T")[0])
-                                setPayoutNotes("")
-                                setPayoutError(null)
-                              }}
+                              onClick={() => handleRecalculateEntry(entry)}
+                              disabled={recalculatingEntryId === entry.id}
+                              title="Recalculate this month"
                             >
-                              Record Payout
+                              {recalculatingEntryId === entry.id ? "Recalculating..." : "Recalculate"}
                             </Button>
-                          )}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleDeleteEntry(entry.id)}
+                              title="Delete compensation line"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
                         </td>
                       )}
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
+                </table>
+              </div>
 
-            {selectedPayoutEntry && payoutEntryId && (
-              <Card className="mt-6">
-                <CardHeader>
-                  <CardTitle className="text-lg">Record Payout</CardTitle>
-                  <CardDescription>
-                    Max payable for {selectedPayoutEntry.periodYear}-{selectedPayoutEntry.periodMonth.toString().padStart(2, "0")}:{" "}
-                    {formatCurrency(selectedPayoutEntry.balance)}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  {payoutError && (
-                    <p className="text-sm text-destructive">{payoutError}</p>
-                  )}
+              {selectedPayoutEntry && payoutEntryId && (
+                <Card className="mt-6">
+                  <CardHeader>
+                    <CardTitle className="text-lg">Record Payout</CardTitle>
+                    <CardDescription>
+                      Max payable for {selectedPayoutEntry.periodYear}-{selectedPayoutEntry.periodMonth.toString().padStart(2, "0")}:{" "}
+                      {formatCurrency(selectedPayoutEntry.balance)}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {payoutError && (
+                      <p className="text-sm text-destructive">{payoutError}</p>
+                    )}
 
-                  <div className="space-y-2">
-                    <Label htmlFor="payoutAmount">Payment Amount</Label>
-                    <Input
-                      id="payoutAmount"
-                      type="number"
-                      step="0.01"
-                      min="0.01"
-                      max={selectedPayoutEntry.balance}
-                      value={payoutAmount}
-                      onChange={(e) => setPayoutAmount(e.target.value)}
-                    />
-                  </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="payoutAmount">Payment Amount</Label>
+                      <Input
+                        id="payoutAmount"
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        max={selectedPayoutEntry.balance}
+                        value={payoutAmount}
+                        onChange={(e) => setPayoutAmount(e.target.value)}
+                      />
+                    </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="payoutDate">Payment Date</Label>
-                    <Input
-                      id="payoutDate"
-                      type="date"
-                      value={payoutDate}
-                      onChange={(e) => setPayoutDate(e.target.value)}
-                    />
-                  </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="payoutDate">Payment Date</Label>
+                      <Input
+                        id="payoutDate"
+                        type="date"
+                        value={payoutDate}
+                        onChange={(e) => setPayoutDate(e.target.value)}
+                      />
+                    </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="payoutNotes">Notes (optional)</Label>
-                    <Textarea
-                      id="payoutNotes"
-                      value={payoutNotes}
-                      onChange={(e) => setPayoutNotes(e.target.value)}
-                      rows={3}
-                      placeholder="Payment notes..."
-                    />
-                  </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="payoutNotes">Notes (optional)</Label>
+                      <Textarea
+                        id="payoutNotes"
+                        value={payoutNotes}
+                        onChange={(e) => setPayoutNotes(e.target.value)}
+                        rows={3}
+                        placeholder="Payment notes..."
+                      />
+                    </div>
 
-                  <div className="flex gap-3">
-                    <Button
-                      onClick={handleRecordPayout}
-                      disabled={payoutLoading || payoutAmount.trim().length === 0}
-                    >
-                      {payoutLoading ? "Recording..." : "Record Payment"}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      type="button"
-                      onClick={() => {
-                        setPayoutEntryId(null)
-                        setPayoutAmount("")
-                        setPayoutNotes("")
-                        setPayoutError(null)
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+                    <div className="flex gap-3">
+                      <Button
+                        onClick={handleRecordPayout}
+                        disabled={payoutLoading || payoutAmount.trim().length === 0}
+                      >
+                        {payoutLoading ? "Recording..." : "Record Payment"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        type="button"
+                        onClick={() => {
+                          setPayoutEntryId(null)
+                          setPayoutAmount("")
+                          setPayoutNotes("")
+                          setPayoutError(null)
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </>
           )}
         </CardContent>
       </Card>

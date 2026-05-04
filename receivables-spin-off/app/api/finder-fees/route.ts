@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
-import { prisma } from "@/lib/prisma"
+import { UserRole } from "@prisma/client"
 import { getFinderFeesForUser } from "@/lib/finder-fee-helpers"
 
 export const dynamic = 'force-dynamic'
@@ -24,7 +24,7 @@ export async function GET(request: Request) {
     // Admins can see any user's fees if userId is provided, otherwise their own
     // Other users can only see their own fees
     let targetUserId = session.user.id
-    if (session.user.role === "ADMIN" && userId) {
+    if ((session.user.role === UserRole.ADMIN || session.user.role === UserRole.MANAGER) && userId) {
       targetUserId = userId
     } else if (session.user.role === "EXTERNAL" && userId && userId !== session.user.id) {
       return NextResponse.json(

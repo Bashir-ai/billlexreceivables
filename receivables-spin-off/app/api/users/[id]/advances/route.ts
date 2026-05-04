@@ -6,6 +6,12 @@ import { prisma } from "@/lib/prisma"
 import { z } from "zod"
 import { UserRole, AdvanceType, AdvanceFrequency } from "@prisma/client"
 
+function advanceStepMonths(frequency: AdvanceFrequency | null | undefined): number {
+  if (frequency === "QUARTERLY") return 3
+  if (frequency === "YEARLY") return 12
+  return 1
+}
+
 const advanceSchema = z.object({
   type: z.enum(["RECURRING", "ONE_OFF"]),
   description: z.string().min(1),
@@ -141,6 +147,43 @@ export async function POST(
           createdBy: session.user.id,
         },
       })
+    } else {
+      // Backfill recurring advances from historical start date until now (or endDate if sooner).
+      const stopAt = validatedData.endDate && validatedData.endDate < new Date() ? validatedData.endDate : new Date()
+      const step = advanceStepMonths(validatedData.frequency as AdvanceFrequency | null)
+      const cursor = new Date(validatedData.startDate)
+      const backfillRows: Array<{
+        userId: string
+        type: "ADVANCE"
+        relatedId: string
+        relatedType: "ADVANCE"
+        amount: number
+        currency: string
+        transactionDate: Date
+        description: string
+        notes: string
+        createdBy: string
+      }> = []
+
+      while (cursor <= stopAt) {
+        backfillRows.push({
+          userId,
+          type: "ADVANCE",
+          relatedId: advance.id,
+          relatedType: "ADVANCE",
+          amount: -validatedData.amount,
+          currency: validatedData.currency,
+          transactionDate: new Date(cursor),
+          description: validatedData.description,
+          notes: `Recurring advance backfill - ${validatedData.frequency}`,
+          createdBy: session.user.id,
+        })
+        cursor.setMonth(cursor.getMonth() + step)
+      }
+
+      if (backfillRows.length > 0) {
+        await prisma.userFinancialTransaction.createMany({ data: backfillRows })
+      }
     }
 
     return NextResponse.json({ advance }, { status: 201 })

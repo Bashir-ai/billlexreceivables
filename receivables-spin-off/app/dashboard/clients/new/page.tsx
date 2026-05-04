@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -25,6 +25,13 @@ interface ClientFinder {
   finderFeePercent: number
 }
 
+interface ClientManagementSplit {
+  userId: string
+  role: "CLIENT_MANAGER" | "PROJECT_MANAGER"
+  splitPercent: number
+  fixedAmount: number
+}
+
 export default function NewClientPage() {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
@@ -45,6 +52,7 @@ export default function NewClientPage() {
     billingZipCode: "",
     billingCountry: "",
     clientManagerId: "",
+    clientManagerPercent: 100,
     clientCode: undefined as number | undefined,
     referrerName: "",
     referrerContactInfo: "",
@@ -52,7 +60,29 @@ export default function NewClientPage() {
   const [suggestedCode, setSuggestedCode] = useState<number | null>(null)
   const [contacts, setContacts] = useState<ContactPerson[]>([])
   const [finders, setFinders] = useState<ClientFinder[]>([])
+  const [managementSplits, setManagementSplits] = useState<ClientManagementSplit[]>([])
   const [users, setUsers] = useState<Array<{ id: string; name: string; email: string }>>([])
+  const [managementUserSearch, setManagementUserSearch] = useState("")
+  const [finderUserSearch, setFinderUserSearch] = useState("")
+  const [clientManagerSearch, setClientManagerSearch] = useState("")
+
+  const sortedUsers = useMemo(
+    () =>
+      [...users].sort(
+        (a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) ||
+          a.email.localeCompare(b.email, undefined, { sensitivity: "base" })
+      ),
+    [users]
+  )
+
+  const filterUsers = (query: string) => {
+    const q = query.trim().toLowerCase()
+    if (!q) return sortedUsers
+    return sortedUsers.filter(
+      (u) => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+    )
+  }
 
   useEffect(() => {
     Promise.all([
@@ -103,6 +133,49 @@ export default function NewClientPage() {
     setFinders(updated)
   }
 
+  const addManagementSplit = () => {
+    setManagementSplits([
+      ...managementSplits,
+      { userId: "", role: "CLIENT_MANAGER", splitPercent: 0, fixedAmount: 0 },
+    ])
+  }
+
+  const removeManagementSplit = (index: number) => {
+    setManagementSplits(managementSplits.filter((_, i) => i !== index))
+  }
+
+  const updateManagementSplit = (
+    index: number,
+    field: keyof ClientManagementSplit,
+    value: string | number
+  ) => {
+    const updated = [...managementSplits]
+    updated[index] = { ...updated[index], [field]: value } as ClientManagementSplit
+    setManagementSplits(updated)
+  }
+
+  const buildManagementSplitsPayload = () => {
+    const explicitSplits = managementSplits
+      .filter((split) => split.userId.trim() !== "")
+      .map((split) => ({
+        ...split,
+        fixedAmount: Number.isFinite(split.fixedAmount) ? split.fixedAmount : 0,
+      }))
+
+    const hasClientManagerRole = explicitSplits.some(
+      (split) => split.role === "CLIENT_MANAGER"
+    )
+    if (!hasClientManagerRole && formData.clientManagerId.trim() !== "") {
+      explicitSplits.push({
+        userId: formData.clientManagerId,
+        role: "CLIENT_MANAGER",
+        splitPercent: Number(formData.clientManagerPercent) || 0,
+        fixedAmount: 0,
+      })
+    }
+    return explicitSplits
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError("")
@@ -117,6 +190,7 @@ export default function NewClientPage() {
           clientCode: formData.clientCode || null, // Send null if undefined to let server auto-generate
           contacts: contacts.filter(c => c.name.trim() !== ""), // Only send contacts with names
           finders: finders.filter(f => f.userId.trim() !== ""), // Only send finders with user selected
+          managementSplits: buildManagementSplitsPayload(),
         }),
       })
 
@@ -267,6 +341,64 @@ export default function NewClientPage() {
               </div>
             </div>
 
+            <div className="space-y-4 border-t pt-4">
+              <div className="flex items-center justify-between">
+                <Label className="text-base font-semibold">Management Splits</Label>
+                <Button type="button" variant="outline" size="sm" onClick={addManagementSplit}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add Split
+                </Button>
+              </div>
+              {managementSplits.length > 0 && (
+                <div className="space-y-2">
+                  <Label htmlFor="managementUserSearch">Filter users</Label>
+                  <Input
+                    id="managementUserSearch"
+                    value={managementUserSearch}
+                    onChange={(e) => setManagementUserSearch(e.target.value)}
+                    placeholder="Type name or email..."
+                  />
+                </div>
+              )}
+              {managementSplits.map((split, index) => (
+                <Card key={`mgmt-${index}`} className="p-4">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="space-y-2">
+                      <Label>User</Label>
+                      <Select value={split.userId} onChange={(e) => updateManagementSplit(index, "userId", e.target.value)}>
+                        <option value="">Select a user...</option>
+                        {filterUsers(managementUserSearch).map((user) => (
+                          <option key={user.id} value={user.id}>
+                            {user.name} ({user.email})
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Role</Label>
+                      <Select value={split.role} onChange={(e) => updateManagementSplit(index, "role", e.target.value)}>
+                        <option value="CLIENT_MANAGER">Client Manager</option>
+                        <option value="PROJECT_MANAGER">Project Manager</option>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Split %</Label>
+                      <Input type="number" min="0" max="100" step="0.01" value={split.splitPercent} onChange={(e) => updateManagementSplit(index, "splitPercent", parseFloat(e.target.value) || 0)} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Fixed Amount</Label>
+                      <Input type="number" min="0" step="0.01" value={split.fixedAmount} onChange={(e) => updateManagementSplit(index, "fixedAmount", parseFloat(e.target.value) || 0)} />
+                    </div>
+                  </div>
+                  <div className="flex justify-end mt-4">
+                    <Button type="button" variant="outline" size="sm" onClick={() => removeManagementSplit(index)}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
             <div className="space-y-2 border-t pt-4">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -326,22 +458,6 @@ export default function NewClientPage() {
               </Label>
             </div>
 
-            <div className="space-y-2 border-t pt-4">
-              <Label htmlFor="clientManagerId">Client Manager</Label>
-              <Select
-                id="clientManagerId"
-                value={formData.clientManagerId}
-                onChange={(e) => setFormData({ ...formData, clientManagerId: e.target.value })}
-              >
-                <option value="">None</option>
-                {users.map((user) => (
-                  <option key={user.id} value={user.id}>
-                    {user.name} ({user.email})
-                  </option>
-                ))}
-              </Select>
-            </div>
-
             <div className="space-y-4 border-t pt-4">
               <Label className="text-base font-semibold">Referrer Information</Label>
               <CardDescription>Person or entity who recommended this client</CardDescription>
@@ -379,8 +495,19 @@ export default function NewClientPage() {
                   Add Finder
                 </Button>
               </div>
+              {finders.length > 0 && (
+                <div className="space-y-2">
+                  <Label htmlFor="finderUserSearch">Filter users</Label>
+                  <Input
+                    id="finderUserSearch"
+                    value={finderUserSearch}
+                    onChange={(e) => setFinderUserSearch(e.target.value)}
+                    placeholder="Type name or email..."
+                  />
+                </div>
+              )}
               {finders.map((finder, index) => {
-                const availableUsers = users.filter(u => 
+                const availableUsers = filterUsers(finderUserSearch).filter(u =>
                   !finders.some((f, i) => i !== index && f.userId === u.id)
                 )
                 return (
@@ -430,6 +557,55 @@ export default function NewClientPage() {
               {finders.length === 0 && (
                 <p className="text-sm text-gray-500">No finders added. Click &quot;Add Finder&quot; to add one.</p>
               )}
+            </div>
+
+            <div className="space-y-4 border-t pt-4">
+              <Label className="text-base font-semibold">Client Manager (default)</Label>
+              <Card className="p-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="clientManagerId">Manager</Label>
+                    <Input
+                      id="clientManagerSearch"
+                      value={clientManagerSearch}
+                      onChange={(e) => setClientManagerSearch(e.target.value)}
+                      placeholder="Type name or email..."
+                    />
+                    <Select
+                      id="clientManagerId"
+                      value={formData.clientManagerId}
+                      onChange={(e) => setFormData({ ...formData, clientManagerId: e.target.value })}
+                    >
+                      <option value="">None</option>
+                      {filterUsers(clientManagerSearch).map((user) => (
+                        <option key={user.id} value={user.id}>
+                          {user.name} ({user.email})
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="clientManagerPercent">Percentage (%)</Label>
+                    <Input
+                      id="clientManagerPercent"
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.01"
+                      value={formData.clientManagerPercent}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          clientManagerPercent: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+              </Card>
+              <CardDescription>
+                Default client-level manager used when an invoice has no explicit client manager split override.
+              </CardDescription>
             </div>
 
             <div className="space-y-4 border-t pt-4">

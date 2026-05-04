@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { generateInvoiceNumber } from "@/lib/invoice-number"
 import { RecurringPaymentFrequency } from "@prisma/client"
+import { createBillAttributionSnapshot } from "@/lib/bill-attribution"
 
 export async function POST(
   request: Request,
@@ -196,6 +197,12 @@ export async function POST(
           },
         },
       },
+    })
+    await createBillAttributionSnapshot({
+      tx: prisma,
+      billId: invoice.id,
+      clientId: invoice.clientId,
+      projectId: invoice.projectId,
     })
 
     // Update proposal's lastRecurringInvoiceDate

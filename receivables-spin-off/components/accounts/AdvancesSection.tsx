@@ -145,7 +145,7 @@ export function AdvancesSection({ userId, startDate, endDate, isAdmin }: Advance
   }
 
   const handleDelete = async (advanceId: string) => {
-    if (!confirm("Are you sure you want to deactivate this advance?")) return
+    if (!confirm("Delete this advance line and all related advance transactions? This cannot be undone.")) return
 
     try {
       const response = await fetch(`/api/users/${userId}/advances/${advanceId}`, {

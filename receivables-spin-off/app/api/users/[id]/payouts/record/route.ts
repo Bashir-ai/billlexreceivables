@@ -128,7 +128,7 @@ export async function POST(
         data: {
           paidAmount: newPaidAmount,
           remainingAmount: newRemainingAmount,
-          paidAt: new Date(),
+          paidAt: payoutDate,
           paidBy: actingUserId,
           status: newRemainingAmount <= 0 ? "PAID" : "PARTIALLY_PAID",
         },

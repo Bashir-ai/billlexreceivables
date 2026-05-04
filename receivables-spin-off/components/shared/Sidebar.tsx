@@ -16,20 +16,18 @@ import {
 } from "@/components/ui/tooltip"
 import {
   LayoutDashboard,
-  FileText,
-  FolderKanban,
   Receipt,
   Users,
   Settings,
   LogOut,
-  CheckSquare,
   Wallet,
   BarChart3,
   UserPlus,
   ChevronLeft,
   ChevronRight,
+  ClipboardList,
   Scale,
-  Clock,
+  TrendingUp,
 } from "lucide-react"
 
 interface SidebarProps {
@@ -54,10 +52,12 @@ const navigationGroups = [
   {
     name: "Work",
     items: [
-      { name: "Proposals", href: "/dashboard/proposals", icon: FileText, roles: ["ADMIN", "MANAGER", "STAFF"] },
-      { name: "Projects", href: "/dashboard/projects", icon: FolderKanban, roles: ["ADMIN", "MANAGER", "STAFF"] },
-      { name: "ToDos", href: "/dashboard/todos", icon: CheckSquare, roles: ["ADMIN", "MANAGER", "STAFF"] },
-      { name: "Timesheets", href: "/dashboard/timesheets", icon: Clock, roles: ["ADMIN", "MANAGER", "STAFF"] },
+      {
+        name: "Operations",
+        href: "/dashboard/operations",
+        icon: ClipboardList,
+        roles: ["ADMIN", "MANAGER", "STAFF"],
+      },
       { name: "Invoices", href: "/dashboard/bills", icon: Receipt, roles: ["ADMIN", "MANAGER", "STAFF", "CLIENT"] },
     ],
   },
@@ -68,6 +68,12 @@ const navigationGroups = [
       { name: "Leads", href: "/dashboard/leads", icon: UserPlus, roles: ["ADMIN", "MANAGER", "STAFF"] },
       { name: "Accounts", href: "/dashboard/accounts", icon: Wallet, roles: ["ADMIN", "MANAGER", "STAFF"] },
       { name: "Reports", href: "/dashboard/reports", icon: BarChart3, roles: ["ADMIN", "MANAGER", "STAFF"] },
+      {
+        name: "Performance vs prior",
+        href: "/dashboard/reports/performance",
+        icon: TrendingUp,
+        roles: ["ADMIN", "MANAGER", "STAFF"],
+      },
     ],
   },
   {
@@ -111,13 +117,13 @@ export function Sidebar({ user, isCollapsed, onToggle }: SidebarProps) {
                 </Link>
               </TooltipTrigger>
               <TooltipContent side="right">
-                Proposal & Billing
+                Billlex Receivables
               </TooltipContent>
             </Tooltip>
           ) : (
             <Link href="/dashboard" className="flex items-center gap-2">
               <Scale className="h-6 w-6 text-primary" />
-              <span className="font-semibold text-sidebar-foreground">BillLex</span>
+              <span className="font-semibold text-sidebar-foreground">Billlex Receivables</span>
             </Link>
           )}
           {!isCollapsed && (

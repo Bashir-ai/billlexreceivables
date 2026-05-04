@@ -6,12 +6,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { formatCurrency } from "@/lib/utils"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
-import { FileText, Receipt, Users, FolderKanban, Plus, ArrowRight, TrendingUp, Clock, CheckCircle2 } from "lucide-react"
+import { Receipt, Users, UserPlus, Wallet } from "lucide-react"
 import { NotificationsBox } from "@/components/dashboard/NotificationsBox"
+import { InvoiceAnalyticsPanel } from "@/components/dashboard/InvoiceAnalyticsPanel"
 import { getNotifications, Notification } from "@/lib/notifications"
-import { FinancialSummary } from "@/components/dashboard/FinancialSummary"
-import { calculateTotalUnbilledWork, calculateClosedProposalsNotCharged } from "@/lib/financial-calculations"
-import { QuickTodoButton } from "@/components/dashboard/QuickTodoButton"
 
 export const dynamic = 'force-dynamic'
 
@@ -41,19 +39,12 @@ export default async function DashboardPage() {
       : undefined
 
     const [
-      proposalsCount,
       billsCount,
       clientsCount,
-      projectsCount,
+      leadsCount,
       totalRevenue,
       invoicedNotPaid,
     ] = await Promise.all([
-      prisma.proposal.count({
-        where: {
-          deletedAt: null,
-          ...(clientWhere || {})
-        },
-      }).catch(() => 0),
       prisma.bill.count({
         where: {
           deletedAt: null,
@@ -65,10 +56,12 @@ export default async function DashboardPage() {
           deletedAt: null,
         },
       }).catch(() => 0),
-      prisma.project.count({
+      prisma.lead.count({
         where: {
           deletedAt: null,
-          ...(clientWhere || {})
+          archivedAt: null,
+          status: { not: "CONVERTED" },
+          convertedToClientId: null,
         },
       }).catch(() => 0),
       prisma.bill.aggregate({
@@ -95,31 +88,6 @@ export default async function DashboardPage() {
       }).catch(() => ({ _sum: { amount: null } })),
     ])
 
-    // Calculate additional financial metrics (with timeout protection)
-    let unbilledWork = { timesheetHours: 0, totalAmount: 0, timesheetAmount: 0, chargesAmount: 0 }
-    let closedProposalsNotCharged = 0
-    
-    try {
-      const calculationsPromise = Promise.all([
-        calculateTotalUnbilledWork(session?.user.role === "CLIENT" ? session?.user.email : undefined),
-        calculateClosedProposalsNotCharged(session?.user.role === "CLIENT" ? session?.user.email : undefined),
-      ])
-      
-      const timeoutPromise = new Promise<[typeof unbilledWork, number]>((_, reject) => 
-        setTimeout(() => reject(new Error('Calculation timeout')), 10000)
-      )
-      
-      const result = await Promise.race([
-        calculationsPromise,
-        timeoutPromise,
-      ])
-      
-      unbilledWork = result[0]
-      closedProposalsNotCharged = result[1]
-    } catch (error) {
-      console.warn("Financial calculations timed out or failed:", error)
-    }
-
   const stats: Array<{
     name: string
     value: number
@@ -129,24 +97,6 @@ export default async function DashboardPage() {
     bgColor: string
     description: string
   }> = [
-    {
-      name: "Proposals",
-      value: proposalsCount,
-      icon: FileText,
-      href: "/dashboard/proposals",
-      color: "text-blue-600",
-      bgColor: "bg-blue-50",
-      description: "Total proposals"
-    },
-    {
-      name: "Projects",
-      value: projectsCount,
-      icon: FolderKanban,
-      href: "/projects",
-      color: "text-violet-600",
-      bgColor: "bg-violet-50",
-      description: "Active projects"
-    },
     {
       name: "Invoices",
       value: billsCount,
@@ -165,6 +115,15 @@ export default async function DashboardPage() {
       bgColor: "bg-amber-50",
       description: "Registered clients"
     },
+    {
+      name: "Leads",
+      value: leadsCount,
+      icon: UserPlus,
+      href: "/dashboard/leads",
+      color: "text-indigo-600",
+      bgColor: "bg-indigo-50",
+      description: "Open CRM leads"
+    },
   ]
 
   const quickActions: Array<{
@@ -172,9 +131,9 @@ export default async function DashboardPage() {
     href: string
     icon: any
   }> = [
-    { name: "New Proposal", href: "/dashboard/proposals/new", icon: FileText },
     { name: "New Invoice", href: "/dashboard/bills/new", icon: Receipt },
     { name: "New Client", href: "/dashboard/clients/new", icon: Users },
+    { name: "New Lead", href: "/dashboard/leads/new", icon: UserPlus },
   ]
 
   return (
@@ -253,43 +212,36 @@ export default async function DashboardPage() {
             
             {session?.user.role !== "CLIENT" && (
               <div className="pt-3 space-y-2">
-                <Link href="/dashboard/approvals/proposals">
+                <Link href="/dashboard/accounts">
                   <Button variant="ghost" className="w-full justify-between group">
                     <span className="flex items-center gap-2">
-                      <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
-                      Approve Proposals
+                      <Wallet className="h-4 w-4 text-muted-foreground" />
+                      Manage Accounts
                     </span>
-                    <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
                   </Button>
                 </Link>
-                <Link href="/dashboard/approvals/invoices">
-                  <Button variant="ghost" className="w-full justify-between group">
-                    <span className="flex items-center gap-2">
-                      <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
-                      Approve Invoices
-                    </span>
-                    <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
-                  </Button>
-                </Link>
-                <QuickTodoButton />
               </div>
             )}
           </CardContent>
         </Card>
-
-        {/* Financial Summary */}
-        <div className="lg:col-span-1">
-          <FinancialSummary
-            totalRevenue={totalRevenue._sum.amount || 0}
-            invoicedNotPaid={invoicedNotPaid._sum.amount || 0}
-            closedProposalsNotCharged={closedProposalsNotCharged}
-            unbilledWork={{
-              timesheetHours: unbilledWork.timesheetHours,
-              totalAmount: unbilledWork.totalAmount,
-            }}
-          />
-        </div>
+        <Card className="lg:col-span-1">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-medium">Receivables Snapshot</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">Total paid revenue</span>
+              <span className="text-sm font-semibold">{formatCurrency(totalRevenue._sum.amount || 0)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">Outstanding invoices</span>
+              <span className="text-sm font-semibold">{formatCurrency(invoicedNotPaid._sum.amount || 0)}</span>
+            </div>
+          </CardContent>
+        </Card>
       </div>
+
+      <InvoiceAnalyticsPanel />
     </div>
     )
   } catch (error) {

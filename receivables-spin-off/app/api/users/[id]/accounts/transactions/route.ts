@@ -19,8 +19,12 @@ export async function GET(
     const { id } = await params
     const userId = id
 
-    // Users can only view their own transactions, admins can view anyone's
-    if (session.user.role !== UserRole.ADMIN && session.user.id !== userId) {
+    // Users view own; admins and managers view anyone's
+    if (
+      session.user.role !== UserRole.ADMIN &&
+      session.user.role !== UserRole.MANAGER &&
+      session.user.id !== userId
+    ) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 

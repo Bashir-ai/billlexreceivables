@@ -17,7 +17,7 @@ export function SubmitInvoiceButton({ invoiceId, canSubmit }: SubmitInvoiceButto
   return (
     <>
       <Button onClick={() => setIsModalOpen(true)}>
-        Submit for Approval
+        Finalize Invoice
       </Button>
       <SubmitInvoiceModal
         invoiceId={invoiceId}

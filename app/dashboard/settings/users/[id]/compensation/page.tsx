@@ -8,38 +8,44 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
-import { formatCurrency } from "@/lib/utils"
+import { formatCurrency, cn } from "@/lib/utils"
+import {
+  type RootCompensationFormData,
+  buildRootCompensationPostBody,
+  defaultRootCompensationForm,
+  directBranchApplicable,
+  projectBranchApplicable,
+  resetInapplicableFieldsRoot,
+} from "@/lib/compensation-form-helpers"
 
 export default function UserCompensationPage() {
   const { data: session } = useSession()
   const router = useRouter()
   const params = useParams()
   const userId = params.id as string
-  
+
   const [user, setUser] = useState<any>(null)
   const [compensation, setCompensation] = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  const [formData, setFormData] = useState({
-    compensationType: "SALARY_BONUS" as "SALARY_BONUS" | "PERCENTAGE_BASED",
-    baseSalary: "",
-    maxBonusMultiplier: "",
-    percentageType: "PROJECT_TOTAL" as "PROJECT_TOTAL" | "DIRECT_WORK" | "BOTH" | null,
-    projectPercentage: "",
-    directWorkPercentage: "",
-    effectiveFrom: new Date().toISOString().split("T")[0],
-    effectiveTo: "",
-  })
+  const [formData, setFormData] = useState<RootCompensationFormData>(defaultRootCompensationForm())
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const t = formData.compensationType
+  const showSalary = t === "SALARY_BONUS"
+  const showPct = t === "PERCENTAGE_BASED"
+  const pt = formData.percentageType
+  const prj = showPct && projectBranchApplicable(pt)
+  const dir = showPct && directBranchApplicable(pt)
+
   useEffect(() => {
     if (!session) return
-    
+
     if (session.user.role !== "ADMIN") {
       router.push("/dashboard/settings")
       return
     }
-    
+
     fetchUser()
     fetchCompensation()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -52,8 +58,8 @@ export default function UserCompensationPage() {
         const data = await response.json()
         setUser(data)
       }
-    } catch (error) {
-      console.error("Error fetching user:", error)
+    } catch (e) {
+      console.error("Error fetching user:", e)
     }
   }
 
@@ -72,17 +78,25 @@ export default function UserCompensationPage() {
           projectPercentage: data.compensation.projectPercentage?.toString() || "",
           directWorkPercentage: data.compensation.directWorkPercentage?.toString() || "",
           effectiveFrom: new Date(data.compensation.effectiveFrom).toISOString().split("T")[0],
-          effectiveTo: data.compensation.effectiveTo 
-            ? new Date(data.compensation.effectiveTo).toISOString().split("T")[0] 
+          effectiveTo: data.compensation.effectiveTo
+            ? new Date(data.compensation.effectiveTo).toISOString().split("T")[0]
             : "",
         })
+      } else {
+        setFormData(defaultRootCompensationForm())
+        setCompensation(null)
       }
-    } catch (error) {
-      console.error("Error fetching compensation:", error)
+    } catch (e) {
+      console.error("Error fetching compensation:", e)
       setError("Failed to load compensation data")
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleTypeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const v = e.target.value as RootCompensationFormData["compensationType"]
+    setFormData((prev) => resetInapplicableFieldsRoot(prev, v))
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -91,18 +105,11 @@ export default function UserCompensationPage() {
     setError(null)
 
     try {
+      const body = buildRootCompensationPostBody(formData)
       const response = await fetch(`/api/users/${userId}/compensation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...formData,
-          baseSalary: formData.baseSalary ? parseFloat(formData.baseSalary) : null,
-          maxBonusMultiplier: formData.maxBonusMultiplier ? parseFloat(formData.maxBonusMultiplier) : null,
-          percentageType: formData.percentageType || null,
-          projectPercentage: formData.projectPercentage ? parseFloat(formData.projectPercentage) : null,
-          directWorkPercentage: formData.directWorkPercentage ? parseFloat(formData.directWorkPercentage) : null,
-          effectiveTo: formData.effectiveTo || null,
-        }),
+        body: JSON.stringify(body),
       })
 
       if (!response.ok) {
@@ -113,8 +120,8 @@ export default function UserCompensationPage() {
 
       await fetchCompensation()
       alert("Compensation updated successfully")
-    } catch (error) {
-      console.error("Error saving compensation:", error)
+    } catch (err) {
+      console.error("Error saving compensation:", err)
       setError("Failed to save compensation")
     } finally {
       setSubmitting(false)
@@ -123,7 +130,7 @@ export default function UserCompensationPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
+      <div className="flex min-h-screen items-center justify-center">
         <div>Loading...</div>
       </div>
     )
@@ -134,9 +141,7 @@ export default function UserCompensationPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">User Compensation</h1>
-          <p className="text-gray-600 mt-2">
-            Manage compensation structure for {user?.name || "this user"}
-          </p>
+          <p className="text-gray-600 mt-2">Manage compensation structure for {user?.name || "this user"}</p>
         </div>
         <Button variant="outline" onClick={() => router.push("/dashboard/settings")}>
           Back to Settings
@@ -154,112 +159,106 @@ export default function UserCompensationPage() {
       <Card>
         <CardHeader>
           <CardTitle>Compensation Structure</CardTitle>
-          <CardDescription>Configure how this user is compensated</CardDescription>
+          <CardDescription>Configure how this user is compensated. Only applicable fields are editable for each type.</CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
               <Label>Compensation Type *</Label>
-              <Select
-                value={formData.compensationType}
-                onChange={(e) => setFormData({ 
-                  ...formData, 
-                  compensationType: e.target.value as "SALARY_BONUS" | "PERCENTAGE_BASED" 
-                })}
-              >
-                <option value="SALARY_BONUS">Salary + Bonus</option>
+              <Select value={formData.compensationType} onChange={handleTypeChange}>
+                <option value="SALARY_BONUS">Salary + Bonus + Finder</option>
                 <option value="PERCENTAGE_BASED">Percentage-Based</option>
               </Select>
             </div>
 
-            {formData.compensationType === "SALARY_BONUS" && (
-              <>
-                <div className="space-y-2">
-                  <Label>Base Salary (Monthly) *</Label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={formData.baseSalary}
-                    onChange={(e) => setFormData({ ...formData, baseSalary: e.target.value })}
-                    required
-                    placeholder="e.g., 5000"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Max Bonus Multiplier *</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={formData.maxBonusMultiplier}
-                    onChange={(e) => setFormData({ ...formData, maxBonusMultiplier: e.target.value })}
-                    required
-                    placeholder="e.g., 2.0 for up to 2x salary"
-                  />
-                  <p className="text-xs text-gray-500">
-                    Maximum bonus multiplier (e.g., 2.0 means bonus can be up to 2x the base salary). Set to 0 for no bonus compensation.
-                  </p>
-                </div>
-              </>
-            )}
+            <div className={cn("space-y-2 rounded-md border p-4", !showSalary && "opacity-60")}>
+              <Label>Base salary (monthly) {showSalary ? "*" : ""}</Label>
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                value={formData.baseSalary}
+                onChange={(e) => setFormData({ ...formData, baseSalary: e.target.value })}
+                required={showSalary}
+                disabled={!showSalary}
+                placeholder="e.g., 5000"
+              />
+            </div>
 
-            {formData.compensationType === "PERCENTAGE_BASED" && (
-              <>
-                <div className="space-y-2">
-                  <Label>Percentage Type *</Label>
-                  <Select
-                    value={formData.percentageType || "PROJECT_TOTAL"}
-                    onChange={(e) => setFormData({ 
-                      ...formData, 
-                      percentageType: e.target.value as "PROJECT_TOTAL" | "DIRECT_WORK" | "BOTH" 
-                    })}
-                  >
-                    <option value="PROJECT_TOTAL">Project Total</option>
-                    <option value="DIRECT_WORK">Direct Work</option>
-                    <option value="BOTH">Both</option>
-                  </Select>
-                </div>
-                {(formData.percentageType === "PROJECT_TOTAL" || formData.percentageType === "BOTH") && (
-                  <div className="space-y-2">
-                    <Label>Project Percentage (%) *</Label>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="100"
-                      value={formData.projectPercentage}
-                      onChange={(e) => setFormData({ ...formData, projectPercentage: e.target.value })}
-                      required
-                      placeholder="e.g., 10"
-                    />
-                    <p className="text-xs text-gray-500">
-                      Percentage of total project value
-                    </p>
-                  </div>
-                )}
-                {(formData.percentageType === "DIRECT_WORK" || formData.percentageType === "BOTH") && (
-                  <div className="space-y-2">
-                    <Label>Direct Work Percentage (%) *</Label>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="100"
-                      value={formData.directWorkPercentage}
-                      onChange={(e) => setFormData({ ...formData, directWorkPercentage: e.target.value })}
-                      required
-                      placeholder="e.g., 15"
-                    />
-                    <p className="text-xs text-gray-500">
-                      Percentage of direct work fees/hours
-                    </p>
-                  </div>
-                )}
-              </>
-            )}
+            <fieldset
+              className={cn("space-y-4 rounded-md border p-4", !showSalary && "opacity-60")}
+              disabled={!showSalary}
+            >
+              <legend className="px-1 text-sm font-medium">Bonus multiplier (salary + bonus)</legend>
+              <div className="space-y-2">
+                <Label>Max Bonus Multiplier {showSalary ? "*" : ""}</Label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={formData.maxBonusMultiplier}
+                  onChange={(e) => setFormData({ ...formData, maxBonusMultiplier: e.target.value })}
+                  required={showSalary}
+                  placeholder="e.g., 2.0 for up to 2x salary"
+                />
+                <p className="text-xs text-gray-500">
+                  Maximum bonus multiplier. Set to 0 for no bonus compensation.
+                </p>
+              </div>
+            </fieldset>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <fieldset
+              className={cn("space-y-4 rounded-md border p-4", !showPct && "opacity-60")}
+              disabled={!showPct}
+            >
+              <legend className="px-1 text-sm font-medium">Percentage-based</legend>
+              <div className="space-y-2">
+                <Label>Percentage Type {showPct ? "*" : ""}</Label>
+                <Select
+                  value={formData.percentageType || "PROJECT_TOTAL"}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      percentageType: e.target.value as "PROJECT_TOTAL" | "DIRECT_WORK" | "BOTH",
+                    })
+                  }
+                >
+                  <option value="PROJECT_TOTAL">Project Total</option>
+                  <option value="DIRECT_WORK">Direct Work</option>
+                  <option value="BOTH">Both</option>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Project Percentage (%) {prj && showPct ? "*" : ""}</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  value={formData.projectPercentage}
+                  onChange={(e) => setFormData({ ...formData, projectPercentage: e.target.value })}
+                  required={prj}
+                  disabled={!prj}
+                  placeholder="e.g., 10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Direct Work Percentage (%) {dir && showPct ? "*" : ""}</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  value={formData.directWorkPercentage}
+                  onChange={(e) => setFormData({ ...formData, directWorkPercentage: e.target.value })}
+                  required={dir}
+                  disabled={!dir}
+                  placeholder="e.g., 15"
+                />
+              </div>
+            </fieldset>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label>Effective From *</Label>
                 <Input
@@ -303,7 +302,7 @@ export default function UserCompensationPage() {
               <div>
                 <span className="text-sm font-medium text-gray-600">Type: </span>
                 <span className="font-semibold">
-                  {compensation.compensationType === "SALARY_BONUS" ? "Salary + Bonus" : "Percentage-Based"}
+                  {compensation.compensationType === "SALARY_BONUS" ? "Salary + Bonus + Finder" : "Percentage-Based"}
                 </span>
               </div>
               {compensation.compensationType === "SALARY_BONUS" && (

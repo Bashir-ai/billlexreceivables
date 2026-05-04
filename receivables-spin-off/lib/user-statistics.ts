@@ -53,17 +53,7 @@ export async function calculateUserStatistics(
       }
     : undefined
 
-  // Billed hours (from timesheet entries that are billed)
-  const billedTimesheetEntries = await prisma.timesheetEntry.findMany({
-    where: {
-      userId,
-      billed: true,
-      ...(dateFilter && { date: dateFilter }),
-    },
-  })
-  const billedHours = billedTimesheetEntries.reduce((sum, entry) => sum + entry.hours, 0)
-  
-  // Billed amount (from bill items where personId matches)
+  // Billed amount (from paid bill items where personId matches)
   const billedBillItems = await prisma.billItem.findMany({
     where: {
       personId: userId,
@@ -76,6 +66,9 @@ export async function calculateUserStatistics(
       bill: true,
     },
   })
+  const billedHours = billedBillItems
+    .filter((item) => item.type === "TIMESHEET")
+    .reduce((sum, item) => sum + (item.billedHours || item.quantity || 0), 0)
   const billedAmount = billedBillItems.reduce((sum, item) => sum + item.amount, 0)
 
   // Clients found (as Client Finder)
@@ -95,47 +88,12 @@ export async function calculateUserStatistics(
     },
   })
 
-  // Projects managed
-  const projectsManaged = await prisma.projectManager.count({
-    where: {
-      userId,
-      ...(dateFilter && { createdAt: dateFilter }),
-    },
-  })
-
-  // Todos assigned
-  const todosAssigned = await prisma.todo.count({
-    where: {
-      assignedTo: userId,
-      ...(dateFilter && { createdAt: dateFilter }),
-    },
-  })
-
-  // Todos ongoing (assigned, not completed, not cancelled)
-  const todosOngoing = await prisma.todo.count({
-    where: {
-      assignedTo: userId,
-      status: { in: ["PENDING", "IN_PROGRESS"] },
-      ...(dateFilter && { createdAt: dateFilter }),
-    },
-  })
-
-  // Todos completed
-  const todosCompleted = await prisma.todo.count({
-    where: {
-      assignedTo: userId,
-      status: "COMPLETED",
-      ...(dateFilter && { completedAt: dateFilter }),
-    },
-  })
-
-  // Todos reassigned
-  const todosReassigned = await prisma.todoReassignment.count({
-    where: {
-      fromUserId: userId,
-      ...(dateFilter && { createdAt: dateFilter }),
-    },
-  })
+  // Retained shape for compatibility with existing API/UI.
+  const projectsManaged = 0
+  const todosAssigned = 0
+  const todosOngoing = 0
+  const todosCompleted = 0
+  const todosReassigned = 0
 
   // Finder fees
   const finderFeesWhere: any = {

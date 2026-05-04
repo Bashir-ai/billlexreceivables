@@ -14,6 +14,7 @@
  */
 
 import { PrismaClient } from "@prisma/client"
+import { createBillAttributionSnapshot } from "../lib/bill-attribution"
 
 const SOURCE_DATABASE_URL = process.env.SOURCE_DATABASE_URL
 const DEST_DATABASE_URL = process.env.DATABASE_URL
@@ -151,6 +152,12 @@ async function main() {
       dest.clientFinder.createMany({ data: data as any, skipDuplicates: SKIP_DUPLICATES })
     )) as number
   }
+  {
+    const rows = await source.clientManagementSplit.findMany()
+    copied.clientManagementSplit = (await createManyInChunks("ClientManagementSplit", rows, (data) =>
+      dest.clientManagementSplit.createMany({ data: data as any, skipDuplicates: SKIP_DUPLICATES })
+    )) as number
+  }
 
   // 2) Project + billing inputs for compensation
   {
@@ -238,6 +245,39 @@ async function main() {
       dest.billItem.createMany({ data: data as any, skipDuplicates: SKIP_DUPLICATES })
     )) as number
   }
+  {
+    const rows = await source.billAttributionSnapshot.findMany()
+    copied.billAttributionSnapshot = (await createManyInChunks("BillAttributionSnapshot", rows, (data) =>
+      dest.billAttributionSnapshot.createMany({ data: data as any, skipDuplicates: SKIP_DUPLICATES })
+    )) as number
+  }
+  {
+    const rows = await source.billAttributionParticipant.findMany()
+    copied.billAttributionParticipant = (await createManyInChunks("BillAttributionParticipant", rows, (data) =>
+      dest.billAttributionParticipant.createMany({ data: data as any, skipDuplicates: SKIP_DUPLICATES })
+    )) as number
+  }
+
+  // Backfill missing attribution snapshots to keep payout history deterministic.
+  const billsWithoutSnapshot = await dest.bill.findMany({
+    where: {
+      attributionSnapshots: { none: {} },
+      deletedAt: null,
+    },
+    select: { id: true, clientId: true, projectId: true },
+  })
+  let backfilledSnapshots = 0
+  for (const bill of billsWithoutSnapshot) {
+    await createBillAttributionSnapshot({
+      tx: dest as any,
+      billId: bill.id,
+      clientId: bill.clientId,
+      projectId: bill.projectId,
+      isBackfilled: true,
+    })
+    backfilledSnapshots += 1
+  }
+  copied.billAttributionBackfilled = backfilledSnapshots
 
   // 5) Finder fees (computed when bills are marked PAID; we migrate earned history)
   {

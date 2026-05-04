@@ -1,5 +1,41 @@
 import { prisma } from "./prisma"
-import { BillStatus } from "@prisma/client"
+import { BillAttributionRole, BillStatus } from "@prisma/client"
+
+type BillNetParts = {
+  subtotal: number | null
+  discountPercent: number | null
+  discountAmount: number | null
+  items: Array<{ amount: number; isCredit: boolean }>
+}
+
+/**
+ * Net for finder / management attribution (subtotal − discount − credit items). Excludes tax.
+ * Same basis as finder fees and management fee creation.
+ */
+export function computeInvoiceNetAmountSync(bill: BillNetParts): number {
+  let subtotal = bill.subtotal || 0
+  if (subtotal === 0) {
+    subtotal = bill.items
+      .filter((item) => !item.isCredit)
+      .reduce((sum, item) => sum + item.amount, 0)
+  }
+
+  let discountValue = 0
+  if (bill.discountPercent && bill.discountPercent > 0) {
+    discountValue = (subtotal * bill.discountPercent) / 100
+  } else if (bill.discountAmount && bill.discountAmount > 0) {
+    discountValue = bill.discountAmount
+  }
+
+  const afterDiscount = subtotal - discountValue
+
+  const expenseReimbursements = bill.items
+    .filter((item) => item.isCredit)
+    .reduce((sum, item) => sum + Math.abs(item.amount), 0)
+
+  const netAmount = afterDiscount - expenseReimbursements
+  return Math.max(0, netAmount)
+}
 
 /**
  * Calculate the net invoice amount for finder fees (original amount minus discounts, NO taxes)
@@ -18,62 +54,66 @@ export async function calculateInvoiceNetAmount(billId: string): Promise<number>
     throw new Error("Invoice not found")
   }
 
-  // Start with subtotal (if available) or calculate from items
-  // This is the "original amount" before taxes
-  let subtotal = bill.subtotal || 0
-  if (subtotal === 0) {
-    subtotal = bill.items
-      .filter((item) => !item.isCredit)
-      .reduce((sum, item) => sum + item.amount, 0)
-  }
-
-  // Calculate discount
-  let discountValue = 0
-  if (bill.discountPercent && bill.discountPercent > 0) {
-    discountValue = (subtotal * bill.discountPercent) / 100
-  } else if (bill.discountAmount && bill.discountAmount > 0) {
-    discountValue = bill.discountAmount
-  }
-
-  const afterDiscount = subtotal - discountValue
-
-  // Calculate expense reimbursements (credit items)
-  const expenseReimbursements = bill.items
-    .filter((item) => item.isCredit)
-    .reduce((sum, item) => sum + Math.abs(item.amount), 0) // Credit items are negative, take absolute value
-
-  // Net amount = original amount (subtotal) - discount - expense reimbursements
-  // Taxes are NOT included in the calculation
-  const netAmount = afterDiscount - expenseReimbursements
-
-  return Math.max(0, netAmount) // Ensure non-negative
+  return computeInvoiceNetAmountSync({
+    subtotal: bill.subtotal,
+    discountPercent: bill.discountPercent,
+    discountAmount: bill.discountAmount,
+    items: bill.items.map((i) => ({ amount: i.amount, isCredit: i.isCredit })),
+  })
 }
 
 /**
  * Calculate and create finder fees for an invoice when it's paid
  */
 export async function calculateAndCreateFinderFees(billId: string): Promise<void> {
+  let supportsAttributionSnapshots = false
+  try {
+    await prisma.bill.findFirst({
+      include: {
+        attributionSnapshots: {
+          take: 1,
+        },
+      },
+    } as any)
+    supportsAttributionSnapshots = true
+  } catch {
+    supportsAttributionSnapshots = false
+  }
+
   const bill = await prisma.bill.findUnique({
     where: { id: billId },
     include: {
       client: {
         include: {
-          finders: {
-            include: {
-              user: true,
-            },
-          },
+          finders: true,
         },
       },
+      ...(supportsAttributionSnapshots
+        ? {
+            attributionSnapshots: {
+              orderBy: { version: "desc" },
+              take: 1,
+              include: { rows: true },
+            },
+          }
+        : {}),
     },
-  })
+  } as any)
 
   if (!bill) {
     throw new Error("Invoice not found")
   }
 
+  const b = bill as typeof bill & {
+    client: {
+      id: string
+      finders: Array<{ id: string; userId: string; finderFeePercent: number }>
+    } | null
+    attributionSnapshots?: Array<{ rows: Array<Record<string, unknown>> }>
+  }
+
   // Check if invoice is paid
-  if (bill.status !== BillStatus.PAID || !bill.paidAt) {
+  if (b.status !== BillStatus.PAID || !b.paidAt) {
     throw new Error("Invoice is not paid")
   }
 
@@ -88,18 +128,30 @@ export async function calculateAndCreateFinderFees(billId: string): Promise<void
   }
 
   // Finder fees only apply to clients, not leads
-  if (!bill.client) {
+  if (!b.client) {
     // No client, nothing to calculate
     return
   }
 
   // Store client in a variable so TypeScript knows it's not null
-  const client = bill.client
+  const client = b.client
 
-  // Get client finders
-  const clientFinders = client.finders || []
+  // Use locked attribution snapshot rows for deterministic finder payouts.
+  const snapshot = b.attributionSnapshots?.[0]
+  const snapshotFinders = ((snapshot?.rows || []) as Array<Record<string, unknown>>).filter(
+    (row) => row.role === BillAttributionRole.FINDER
+  )
+  const fallbackFinders = (b.client?.finders || []).map((finder) => ({
+    userId: finder.userId,
+    splitPercent: finder.finderFeePercent || 0,
+    fixedAmount: 0,
+    sourceClientFinderId: finder.id,
+  }))
+  const effectiveFinders = snapshotFinders.length > 0
+    ? snapshotFinders
+    : fallbackFinders
 
-  if (clientFinders.length === 0) {
+  if (effectiveFinders.length === 0) {
     // No finders, nothing to calculate
     return
   }
@@ -114,24 +166,47 @@ export async function calculateAndCreateFinderFees(billId: string): Promise<void
 
   // Create finder fees for each finder
   const finderFees = await Promise.all(
-    clientFinders.map(async (clientFinder) => {
-      if (clientFinder.finderFeePercent <= 0) {
+    effectiveFinders.map(async (snapshotFinder: Record<string, unknown>) => {
+      const splitPct = Number(snapshotFinder.splitPercent) || 0
+      if (splitPct <= 0) {
         return null // Skip finders with 0% fee
       }
 
-      const finderFeeAmount = (netAmount * clientFinder.finderFeePercent) / 100
+      const finderFeeAmount =
+        (netAmount * splitPct) / 100 + Number(snapshotFinder.fixedAmount || 0)
+      const snapshotUserId = snapshotFinder.userId as string
+      let sourceClientFinderId =
+        (snapshotFinder.sourceClientFinderId as string | undefined) ||
+        (
+          await prisma.clientFinder.findFirst({
+            where: { clientId: client.id, userId: snapshotUserId },
+            select: { id: true },
+          })
+        )?.id
+
+      if (!sourceClientFinderId) {
+        const created = await prisma.clientFinder.create({
+          data: {
+            clientId: client.id,
+            userId: snapshotUserId,
+            finderFeePercent: splitPct,
+          },
+          select: { id: true },
+        })
+        sourceClientFinderId = created.id
+      }
 
       return prisma.finderFee.create({
         data: {
-          billId: bill.id,
+          billId: b.id,
           clientId: client.id, // Use client.id since we've already verified client exists
-          finderId: clientFinder.userId,
-          clientFinderId: clientFinder.id,
+          finderId: snapshotFinder.userId as string,
+          clientFinderId: sourceClientFinderId,
           invoiceNetAmount: netAmount,
-          finderFeePercent: clientFinder.finderFeePercent,
+          finderFeePercent: splitPct,
           finderFeeAmount: finderFeeAmount,
           remainingAmount: finderFeeAmount,
-          earnedAt: bill.paidAt!,
+          earnedAt: b.paidAt!,
           status: "PENDING",
         },
       })
@@ -139,7 +214,9 @@ export async function calculateAndCreateFinderFees(billId: string): Promise<void
   )
 
   // Filter out nulls (finders with 0% fee)
-  const createdFees = finderFees.filter((fee) => fee !== null)
+  const createdFees = finderFees.filter(
+    (fee): fee is NonNullable<(typeof finderFees)[number]> => fee !== null
+  )
 
   return
 }

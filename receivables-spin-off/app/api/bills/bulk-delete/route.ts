@@ -19,7 +19,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    if (session.user.role !== "ADMIN") {
+    if (session.user.role === "CLIENT") {
       return NextResponse.json(
         { error: "Forbidden" },
         { status: 403 }
@@ -58,14 +58,23 @@ export async function POST(request: Request) {
             const deletionCheck = await canDeleteBill(billId)
             const bill = await prisma.bill.findUnique({
               where: { id: billId },
-              select: { id: true, invoiceNumber: true },
+              select: { id: true, invoiceNumber: true, createdBy: true, status: true },
             })
+
+            const roleAllowed =
+              session.user.role === "ADMIN" ||
+              session.user.role === "MANAGER" ||
+              (!!bill && bill.createdBy === session.user.id && bill.status === "DRAFT")
+            const canDelete = deletionCheck.canDelete && roleAllowed
+            const roleReason = !roleAllowed
+              ? "Only admins/managers or the creator of a draft invoice can delete."
+              : undefined
 
             return {
               id: billId,
               name: bill?.invoiceNumber || `Invoice ${billId.slice(0, 8)}`,
-              canDelete: deletionCheck.canDelete,
-              reason: deletionCheck.reason,
+              canDelete,
+              reason: roleReason || deletionCheck.reason,
             }
           } catch (error) {
             if (!isDatabaseConnectionError(error)) {
@@ -132,9 +141,17 @@ export async function POST(request: Request) {
         billIds.map(async (billId) => {
           try {
             const deletionCheck = await canDeleteBill(billId)
+            const bill = await prisma.bill.findUnique({
+              where: { id: billId },
+              select: { id: true, createdBy: true, status: true },
+            })
+            const roleAllowed =
+              session.user.role === "ADMIN" ||
+              session.user.role === "MANAGER" ||
+              (!!bill && bill.createdBy === session.user.id && bill.status === "DRAFT")
             return {
               id: billId,
-              canDelete: deletionCheck.canDelete,
+              canDelete: deletionCheck.canDelete && roleAllowed,
             }
           } catch (error) {
             console.error(`Error validating bill ${billId} for deletion:`, error)

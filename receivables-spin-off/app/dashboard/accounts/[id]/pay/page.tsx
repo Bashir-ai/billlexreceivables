@@ -44,7 +44,7 @@ export default function RecordPaymentPage() {
   })
 
   useEffect(() => {
-    if (!session || session.user.role !== "ADMIN") {
+    if (!session || (session.user.role !== "ADMIN" && session.user.role !== "MANAGER")) {
       router.push("/dashboard/accounts")
       return
     }

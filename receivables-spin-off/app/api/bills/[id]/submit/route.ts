@@ -3,14 +3,7 @@ import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
-import { z } from "zod"
-import { BillStatus, UserRole } from "@prisma/client"
-import { sendInternalApprovalRequest } from "@/lib/email"
-
-const submitSchema = z.object({
-  approverIds: z.array(z.string()).optional(), // Team members who need to approve
-  approvalRequirement: z.enum(["ALL", "ANY", "MAJORITY"]).optional(), // Approval requirement type
-})
+import { BillStatus } from "@prisma/client"
 
 export async function POST(
   request: Request,
@@ -78,141 +71,25 @@ export async function POST(
       )
     }
 
-    const body = await request.json()
-    const validatedData = submitSchema.parse(body)
-
-    const approverIds = validatedData.approverIds || []
-    const approvalRequirement = validatedData.approvalRequirement || "ALL"
-    const requiresInternalApproval = approverIds.length > 0
-
-    // Validate approvers exist and are not clients
-    if (requiresInternalApproval) {
-      const approvers = await prisma.user.findMany({
-        where: {
-          id: { in: approverIds },
-          role: { not: UserRole.CLIENT },
-        },
-      })
-
-      if (approvers.length !== approverIds.length) {
-        return NextResponse.json(
-          { error: "One or more selected approvers are invalid" },
-          { status: 400 }
-        )
-      }
-
-      // Create approval records for each approver
-      await prisma.approval.createMany({
-        data: approverIds.map(approverId => ({
-          billId: id,
-          approverId,
-          status: "PENDING",
-        })),
-        skipDuplicates: true,
-      })
-
-      // Create todos for each approver
-      const { TodoPriority } = await import("@prisma/client")
-      const dueDate = new Date()
-      dueDate.setDate(dueDate.getDate() + 3) // Due in 3 days
-
-      for (const approverId of approverIds) {
-        try {
-          const entityName = bill.client?.name || bill.lead?.name || bill.client?.company || bill.lead?.company || "Unknown"
-          const entityType = bill.client ? "Client" : "Lead"
-          await prisma.todo.create({
-            data: {
-              title: `Approve Invoice: ${bill.invoiceNumber || bill.id}`,
-              description: `Invoice ${bill.invoiceNumber || bill.id} requires your approval. ${entityType}: ${entityName}${bill.amount ? ` - Amount: ${bill.amount}` : ""}`,
-              assignedTo: approverId,
-              createdBy: session.user.id,
-              dueDate: dueDate,
-              priority: TodoPriority.HIGH,
-              status: "PENDING",
-              invoiceId: id,
-              projectId: bill.projectId,
-              clientId: bill.clientId,
-              leadId: bill.leadId,
-            },
-          })
-        } catch (todoError) {
-          console.error(`Failed to create todo for approver ${approverId}:`, todoError)
-          // Continue with other todos even if one fails
-        }
-      }
-
-      // Send email notifications to approvers
-      for (const approver of approvers) {
-        try {
-          const entityName = bill.client?.name || bill.lead?.name || ""
-          const entityCompany = bill.client?.company || bill.lead?.company || null
-          await sendInternalApprovalRequest(approver.email, approver.name, {
-            id: bill.id,
-            title: `Invoice ${bill.invoiceNumber || bill.id}`,
-            proposalNumber: bill.invoiceNumber ?? null,
-            client: {
-              name: entityName,
-              company: entityCompany,
-            },
-            creator: {
-              name: bill.creator.name || bill.creator.email,
-            },
-            amount: bill.amount,
-            currency: "EUR", // TODO: get from project/proposal
-          })
-        } catch (emailError) {
-          console.error(`Failed to send email to ${approver.email}:`, emailError)
-          // Continue with other emails even if one fails
-        }
-      }
-    }
-
-    // Update invoice status
-    const updateData: any = {
-      status: BillStatus.SUBMITTED,
-      submittedAt: new Date(),
-    }
-
-    if (requiresInternalApproval) {
-      updateData.internalApprovalRequired = true
-      updateData.internalApprovalType = approvalRequirement
-      updateData.requiredApproverIds = approverIds
-      updateData.internalApprovalsComplete = false
-    } else {
-      // No internal approvals required, mark as complete
-      updateData.internalApprovalRequired = false
-      updateData.internalApprovalsComplete = true
-    }
-
     const updatedBill = await prisma.bill.update({
       where: { id },
-      data: updateData,
+      data: {
+        // Internal-only flow: submission auto-approves invoice.
+        status: BillStatus.APPROVED,
+        submittedAt: new Date(),
+        approvedAt: new Date(),
+        internalApprovalRequired: false,
+        internalApprovalsComplete: true,
+        requiredApproverIds: [],
+      },
       include: {
         client: true,
         creator: true,
-        approvals: {
-          include: {
-            approver: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
       },
     })
 
     return NextResponse.json(updatedBill)
   } catch (error: any) {
-    if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: "Invalid input", details: error.errors },
-        { status: 400 }
-      )
-    }
-
     console.error("Error submitting invoice:", error)
     return NextResponse.json(
       { error: "Internal server error", message: error.message },

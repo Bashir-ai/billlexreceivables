@@ -4,8 +4,8 @@ import { useState, useEffect } from "react"
 import { useSession } from "next-auth/react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Select } from "@/components/ui/select"
-import { formatCurrency, formatDate } from "@/lib/utils"
-import { BarChart3, Clock, Users, FolderKanban, CheckSquare, Wallet } from "lucide-react"
+import { formatCurrency } from "@/lib/utils"
+import { Clock, Users, Wallet } from "lucide-react"
 import { ClientReports } from "@/components/reports/ClientReports"
 
 interface UserStatistics {
@@ -227,50 +227,11 @@ export default function ReportsPage() {
                   </div>
 
                   {/* Projects */}
-                  <div className="space-y-4">
-                    <h3 className="font-semibold flex items-center gap-2">
-                      <FolderKanban className="h-4 w-4" />
-                      Projects
-                    </h3>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">Projects Managed:</span>
-                        <span className="font-semibold">{stats.projectsManaged}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Todos */}
-                  <div className="space-y-4">
-                    <h3 className="font-semibold flex items-center gap-2">
-                      <CheckSquare className="h-4 w-4" />
-                      Todos
-                    </h3>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">Assigned:</span>
-                        <span className="font-semibold">{stats.todosAssigned}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">Ongoing:</span>
-                        <span className="font-semibold">{stats.todosOngoing}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">Completed:</span>
-                        <span className="font-semibold">{stats.todosCompleted}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">Reassigned:</span>
-                        <span className="font-semibold">{stats.todosReassigned}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Finder Fees */}
+                  {/* Finder / management fees */}
                   <div className="space-y-4">
                     <h3 className="font-semibold flex items-center gap-2">
                       <Wallet className="h-4 w-4" />
-                      Finder Fees
+                      Finder / Management Fees
                     </h3>
                     <div className="space-y-2 text-sm">
                       <div className="flex justify-between">
@@ -311,9 +272,6 @@ export default function ReportsPage() {
                     <th className="text-right p-2">Billed Amount</th>
                     <th className="text-right p-2">Clients Found</th>
                     <th className="text-right p-2">Clients Managed</th>
-                    <th className="text-right p-2">Projects Managed</th>
-                    <th className="text-right p-2">Todos Assigned</th>
-                    <th className="text-right p-2">Todos Completed</th>
                     <th className="text-right p-2">Finder Fees Earned</th>
                   </tr>
                 </thead>
@@ -325,9 +283,6 @@ export default function ReportsPage() {
                       <td className="text-right p-2">{formatCurrency(stats.billedAmount)}</td>
                       <td className="text-right p-2">{stats.clientsFound}</td>
                       <td className="text-right p-2">{stats.clientsManaged}</td>
-                      <td className="text-right p-2">{stats.projectsManaged}</td>
-                      <td className="text-right p-2">{stats.todosAssigned}</td>
-                      <td className="text-right p-2">{stats.todosCompleted}</td>
                       <td className="text-right p-2">{formatCurrency(stats.finderFeesEarned)}</td>
                     </tr>
                   ))}

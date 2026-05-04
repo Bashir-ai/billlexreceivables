@@ -69,6 +69,11 @@ export default async function ClientDetailPage({
           user: { select: { id: true, name: true, email: true } },
         },
       },
+      managementSplits: {
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
       clientManager: { select: { id: true, name: true, email: true } },
     },
   })
@@ -167,6 +172,21 @@ export default async function ClientDetailPage({
                 <span>{client.clientManager.name} ({client.clientManager.email})</span>
               </div>
             )}
+            {client.managementSplits.length > 0 && (
+              <div>
+                <span className="text-sm text-gray-600">Management Splits: </span>
+                <div className="mt-1 space-y-1">
+                  {client.managementSplits.map((split) => (
+                    <div key={split.id} className="text-sm">
+                      <span>{split.user.name}</span>
+                      <span className="text-gray-500 ml-2">
+                        {split.role === "CLIENT_MANAGER" ? "Client Manager" : "Project Manager"} - {split.splitPercent}%{split.fixedAmount ? ` + ${formatCurrency(split.fixedAmount)}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {client.referrerName && (
               <div>
                 <span className="text-sm text-gray-600">Referrer: </span>
@@ -218,48 +238,6 @@ export default async function ClientDetailPage({
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
-              <CardTitle>Recent Proposals</CardTitle>
-              <Link href={`/dashboard/proposals/new?clientId=${client.id}`}>
-                <Button size="sm" variant="outline">
-                  New Proposal
-                </Button>
-              </Link>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {client.proposals.length === 0 ? (
-              <p className="text-sm text-gray-500">No proposals yet</p>
-            ) : (
-              <div className="space-y-2">
-                {client.proposals.slice(0, 5).map((proposal) => (
-                  <Link
-                    key={proposal.id}
-                    href={`/dashboard/proposals/${proposal.id}`}
-                    className="block p-2 rounded hover:bg-gray-50"
-                  >
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <p className="font-medium">{proposal.title}</p>
-                        <p className="text-sm text-gray-500">
-                          {proposal.type} • {proposal.status}
-                        </p>
-                      </div>
-                      {proposal.amount && (
-                        <span className="font-semibold">
-                          {formatCurrency(proposal.amount)}
-                        </span>
-                      )}
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
               <CardTitle>Recent Bills</CardTitle>
               <Link href="/dashboard/bills/new">
                 <Button size="sm" variant="outline">
@@ -296,42 +274,6 @@ export default async function ClientDetailPage({
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Recent Projects</CardTitle>
-              <Link href={`/dashboard/projects/new?clientId=${client.id}`}>
-                <Button size="sm" variant="outline">
-                  New Project
-                </Button>
-              </Link>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {client.projects.length === 0 ? (
-              <p className="text-sm text-gray-500">No projects yet</p>
-            ) : (
-              <div className="space-y-2">
-                {client.projects.slice(0, 5).map((project) => (
-                  <Link
-                    key={project.id}
-                    href={`/dashboard/projects/${project.id}`}
-                    className="block p-2 rounded hover:bg-gray-50"
-                  >
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <p className="font-medium">{project.name}</p>
-                        <p className="text-sm text-gray-500">
-                          {project.status} • {formatDate(project.createdAt)}
-                        </p>
-                      </div>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
       </div>
 
       {/* Compensation Eligibility Section (Admin only) */}

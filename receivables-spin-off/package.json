@@ -1,11 +1,13 @@
 {
-  "name": "receivables-spin-off",
+  "name": "billlex-receivables",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "create-dummy-users": "npx tsx scripts/create-dummy-users.ts",
-    "dev": "next dev -p 3001",
-    "build": "prisma generate && prisma db push --accept-data-loss || (echo 'Migration failed, continuing build...' && prisma generate && next build)",
+    "dev": "WATCHPACK_POLLING=true next dev -p 3001",
+    "dev:tunnel": "node scripts/run-dev-with-tunnel.mjs",
+    "tunnel:env": "node scripts/print-tunnel-env.mjs",
+    "build": "prisma generate && prisma db push --accept-data-loss && next build || (echo 'Migration failed, continuing build...' && prisma generate && next build)",
     "postbuild": "node scripts/copy-pdfkit-fonts.js",
     "start": "next start -p 3001",
     "lint": "next lint",
@@ -17,7 +19,8 @@
     "db:studio": "prisma studio",
     "db:migrate-upfront": "prisma db push && prisma generate",
     "data:migrate": "npx tsx scripts/migrate-receivables-subset.ts",
-    "reconcile:data": "npx tsx scripts/reconcile-receivables-subset.ts"
+    "reconcile:data": "npx tsx scripts/reconcile-receivables-subset.ts",
+    "prod": "npm run build && npm run start"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.0",

@@ -4,9 +4,15 @@ import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { z } from "zod"
-import { BillStatus } from "@prisma/client"
+import { BillAttributionRole, BillStatus } from "@prisma/client"
 import { canEditInvoice } from "@/lib/permissions"
 import { parseLocalDate } from "@/lib/utils"
+import {
+  buildDefaultBillAttributionRows,
+  createBillAttributionSnapshot,
+  createBillAttributionSnapshotFromRows,
+} from "@/lib/bill-attribution"
+import { apiRowsToBillAttributionInputs, billAttributionRowsApiSchema } from "@/lib/bill-attribution-api"
 
 const billUpdateSchema = z.object({
   amount: z.number().min(0).optional(),
@@ -21,7 +27,27 @@ const billUpdateSchema = z.object({
   status: z.nativeEnum(BillStatus).optional(),
   clientId: z.string().optional().nullable(),
   leadId: z.string().optional().nullable(),
+  attributionRows: billAttributionRowsApiSchema.optional(),
 })
+
+function mergeAttributionByRole(options: {
+  defaults: ReturnType<typeof apiRowsToBillAttributionInputs>
+  overrides: ReturnType<typeof apiRowsToBillAttributionInputs>
+}) {
+  const { defaults, overrides } = options
+  const roles: BillAttributionRole[] = [
+    BillAttributionRole.FINDER,
+    BillAttributionRole.CLIENT_MANAGER,
+    BillAttributionRole.PROJECT_MANAGER,
+  ]
+  const merged: ReturnType<typeof apiRowsToBillAttributionInputs> = []
+  for (const role of roles) {
+    const roleOverrides = overrides.filter((r) => r.role === role)
+    const source = roleOverrides.length > 0 ? roleOverrides : defaults.filter((r) => r.role === role)
+    merged.push(...source)
+  }
+  return merged
+}
 
 export async function GET(
   request: Request,
@@ -29,6 +55,19 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    let supportsAttributionSnapshots = false
+    try {
+      await prisma.bill.findFirst({
+        include: {
+          attributionSnapshots: {
+            take: 1,
+          },
+        },
+      } as any)
+      supportsAttributionSnapshots = true
+    } catch {
+      supportsAttributionSnapshots = false
+    }
     const session = await getServerSession(authOptions)
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -120,6 +159,24 @@ export async function GET(
           },
           orderBy: { createdAt: "desc" },
         },
+        ...(supportsAttributionSnapshots
+          ? {
+              attributionSnapshots: {
+                orderBy: { version: "desc" },
+                take: 1,
+                include: {
+                  rows: {
+                    include: {
+                      user: {
+                        select: { id: true, name: true, email: true },
+                      },
+                    },
+                    orderBy: { createdAt: "asc" },
+                  },
+                },
+              },
+            }
+          : {}),
       },
     })
 
@@ -226,6 +283,35 @@ export async function PUT(
 
     const body = await request.json()
     const validatedData = billUpdateSchema.parse(body)
+    if (validatedData.attributionRows !== undefined) {
+      const canEditAttr =
+        bill.status === BillStatus.DRAFT ||
+        bill.status === BillStatus.SUBMITTED ||
+        bill.status === BillStatus.APPROVED
+      if (!canEditAttr) {
+        return NextResponse.json(
+          { error: "Attribution can only be edited before invoice is settled/cancelled" },
+          { status: 400 }
+        )
+      }
+
+      if (validatedData.attributionRows.length > 0) {
+        const rowsByRole = {
+          FINDER: validatedData.attributionRows.filter((row) => row.role === "FINDER"),
+          CLIENT_MANAGER: validatedData.attributionRows.filter((row) => row.role === "CLIENT_MANAGER"),
+          PROJECT_MANAGER: validatedData.attributionRows.filter((row) => row.role === "PROJECT_MANAGER"),
+        }
+        for (const [role, rows] of Object.entries(rowsByRole)) {
+          const total = rows.reduce((sum, row) => sum + row.splitPercent, 0)
+          if (total > 100.0001) {
+            return NextResponse.json(
+              { error: `${role} split percentage cannot exceed 100` },
+              { status: 400 }
+            )
+          }
+        }
+      }
+    }
 
     // Validate client/lead if being updated
     if (validatedData.clientId !== undefined || validatedData.leadId !== undefined) {
@@ -411,18 +497,66 @@ export async function PUT(
         proposal: true,
       },
     })
+    if (validatedData.attributionRows !== undefined) {
+      const latestSnapshot = await prisma.billAttributionSnapshot.findFirst({
+        where: { billId: id },
+        orderBy: { version: "desc" },
+      })
+      const nextVersion = (latestSnapshot?.version || 0) + 1
+      const defaultRows = await buildDefaultBillAttributionRows({
+        tx: prisma,
+        clientId: updatedBill.clientId,
+        projectId: updatedBill.projectId,
+      })
+      const overrideRows = apiRowsToBillAttributionInputs(validatedData.attributionRows)
+      // Per-role merge: if only management is overridden on invoice, finder defaults from client are preserved.
+      const mergedRows = mergeAttributionByRole({
+        defaults: defaultRows,
+        overrides: overrideRows,
+      })
+      await createBillAttributionSnapshotFromRows({
+        tx: prisma,
+        billId: id,
+        clientId: updatedBill.clientId,
+        projectId: updatedBill.projectId,
+        version: nextVersion,
+        rows: mergedRows,
+      })
+    } else {
+      const hasSnapshot = await prisma.billAttributionSnapshot.findFirst({
+        where: { billId: id },
+        select: { id: true },
+      })
+      if (!hasSnapshot) {
+        await createBillAttributionSnapshot({
+          tx: prisma,
+          billId: id,
+          clientId: updatedBill.clientId,
+          projectId: updatedBill.projectId,
+        })
+      }
+    }
 
     // Calculate finder fees if invoice was just marked as PAID
     if (isNowPaid && !wasPaid) {
       try {
-        const { calculateAndCreateFinderFees } = await import("@/lib/finder-fee-helpers")
-        await calculateAndCreateFinderFees(id)
+        const { runPaidInvoiceLedgerHooks } = await import("@/lib/invoice-paid-fees")
+        await runPaidInvoiceLedgerHooks(id)
       } catch (error) {
         // Log error but don't fail the request
-        console.error("Error calculating finder fees:", error)
+        console.error("Error calculating paid-invoice fees:", error)
         if (error instanceof Error) {
-          console.error("Finder fee error details:", error.message, error.stack)
+          console.error("Paid invoice fee error details:", error.message, error.stack)
         }
+      }
+    }
+
+    if (updatedBill.status === BillStatus.PAID) {
+      try {
+        const { resyncFinderAndManagementFeesForPaidBill } = await import("@/lib/attribution-fee-resync")
+        await resyncFinderAndManagementFeesForPaidBill(id)
+      } catch (error) {
+        console.error("Error resyncing finder/management fees after invoice update:", error)
       }
     }
 
@@ -623,12 +757,11 @@ export async function POST(
         },
       })
 
-      // Ensure finder fees are created immediately when invoice transitions to PAID
       try {
-        const { calculateAndCreateFinderFees } = await import("@/lib/finder-fee-helpers")
-        await calculateAndCreateFinderFees(id)
+        const { runPaidInvoiceLedgerHooks } = await import("@/lib/invoice-paid-fees")
+        await runPaidInvoiceLedgerHooks(id)
       } catch (error) {
-        console.error("Error calculating finder fees:", error)
+        console.error("Error calculating paid-invoice fees:", error)
       }
 
       return NextResponse.json(bill)
@@ -657,20 +790,38 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Only admin can delete
-    if (session.user.role !== "ADMIN") {
-      return NextResponse.json(
-        { error: "Forbidden. Only admins can delete invoices." },
-        { status: 403 }
-      )
-    }
-
     const bill = await prisma.bill.findUnique({
       where: { id },
+      select: {
+        id: true,
+        createdBy: true,
+        status: true,
+      },
     })
 
     if (!bill) {
       return NextResponse.json({ error: "Invoice not found" }, { status: 404 })
+    }
+
+    // Allow admins/managers, or creator for draft invoices.
+    const canDelete =
+      session.user.role === "ADMIN" ||
+      session.user.role === "MANAGER" ||
+      (bill.createdBy === session.user.id && bill.status === BillStatus.DRAFT)
+
+    if (!canDelete) {
+      return NextResponse.json(
+        { error: "You don't have permission to delete this invoice." },
+        { status: 403 }
+      )
+    }
+
+    // Prevent deleting paid invoices.
+    if (bill.status === BillStatus.PAID) {
+      return NextResponse.json(
+        { error: "Cannot delete a paid invoice." },
+        { status: 400 }
+      )
     }
 
     // Soft delete: set deletedAt timestamp

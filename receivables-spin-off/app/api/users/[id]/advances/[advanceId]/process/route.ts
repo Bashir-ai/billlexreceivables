@@ -5,6 +5,12 @@ import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { UserRole } from "@prisma/client"
 
+function stepMonths(frequency: "MONTHLY" | "QUARTERLY" | "YEARLY" | null | undefined) {
+  if (frequency === "QUARTERLY") return 3
+  if (frequency === "YEARLY") return 12
+  return 1
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string; advanceId: string }> }
@@ -48,54 +54,47 @@ export async function POST(
       return NextResponse.json({ message: "Advance has ended and has been deactivated" })
     }
 
-    // Check last transaction for this advance
-    const lastTransaction = await prisma.userFinancialTransaction.findFirst({
+    const step = stepMonths(advance.frequency)
+    const existingTx = await prisma.userFinancialTransaction.findMany({
       where: {
         userId,
         relatedId: advanceId,
         relatedType: "ADVANCE",
       },
-      orderBy: { transactionDate: 'desc' },
+      select: { transactionDate: true },
     })
+    const existingKeys = new Set(existingTx.map((tx) => tx.transactionDate.toISOString().slice(0, 10)))
+    const stopAt = advance.endDate && advance.endDate < now ? advance.endDate : now
+    const cursor = new Date(advance.startDate)
+    const rows: Array<any> = []
 
-    // Determine next processing date
-    let nextDate = new Date(advance.startDate)
-    if (lastTransaction) {
-      nextDate = new Date(lastTransaction.transactionDate)
-      if (advance.frequency === "MONTHLY") {
-        nextDate.setMonth(nextDate.getMonth() + 1)
-      } else if (advance.frequency === "QUARTERLY") {
-        nextDate.setMonth(nextDate.getMonth() + 3)
-      } else if (advance.frequency === "YEARLY") {
-        nextDate.setFullYear(nextDate.getFullYear() + 1)
+    while (cursor <= stopAt) {
+      const key = cursor.toISOString().slice(0, 10)
+      if (!existingKeys.has(key)) {
+        rows.push({
+          userId,
+          type: "ADVANCE",
+          relatedId: advanceId,
+          relatedType: "ADVANCE",
+          amount: -advance.amount,
+          currency: advance.currency,
+          transactionDate: new Date(cursor),
+          description: advance.description,
+          notes: `Recurring advance payment - ${advance.frequency}`,
+          createdBy: session.user.id,
+        })
       }
+      cursor.setMonth(cursor.getMonth() + step)
     }
 
-    // Check if it's time to process
-    if (now < nextDate) {
-      return NextResponse.json({ 
-        message: "Not yet time to process this advance",
-        nextProcessDate: nextDate,
+    if (rows.length === 0) {
+      return NextResponse.json({
+        message: "No missing advance transactions to process",
       })
     }
 
-    // Create transaction
-    const transaction = await prisma.userFinancialTransaction.create({
-      data: {
-        userId,
-        type: "ADVANCE",
-        relatedId: advanceId,
-        relatedType: "ADVANCE",
-        amount: -advance.amount, // Negative because it's a credit against the user
-        currency: advance.currency,
-        transactionDate: nextDate,
-        description: advance.description,
-        notes: `Recurring advance payment - ${advance.frequency}`,
-        createdBy: session.user.id,
-      },
-    })
-
-    return NextResponse.json({ transaction }, { status: 201 })
+    await prisma.userFinancialTransaction.createMany({ data: rows })
+    return NextResponse.json({ createdCount: rows.length }, { status: 201 })
   } catch (error: any) {
     console.error("Error processing advance:", error)
     return NextResponse.json(

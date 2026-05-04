@@ -72,7 +72,7 @@ export async function POST(
     let percentageEarnings: number | null = null
 
     if (compensation.compensationType === CompensationType.SALARY_BONUS) {
-      // Salary + Bonus calculation
+      // Base salary + bonus (SALARY_BONUS; shown in UI as "Salary + Bonus + Finder")
       const multiplier = bonusMultiplier ?? 0
       if (multiplier < 0 || (compensation.maxBonusMultiplier && multiplier > compensation.maxBonusMultiplier)) {
         return NextResponse.json({ 

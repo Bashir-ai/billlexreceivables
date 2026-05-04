@@ -1,6 +1,3 @@
-import { prisma } from "@/lib/prisma"
-import { canApproveProposals, canApproveInvoices } from "@/lib/permissions"
-
 export interface Notification {
   type: string
   id: string
@@ -17,362 +14,12 @@ export interface Notification {
 
 export async function getNotifications(userId: string, userRole: string): Promise<{ count: number; notifications: Notification[] }> {
   try {
-    // Fetch user with permissions
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        role: true,
-        canApproveProposals: true,
-        canApproveInvoices: true,
-      },
-    })
-
-    if (!user) {
-      return { count: 0, notifications: [] }
+    const notifications = await getOutstandingInvoiceNotifications(userId)
+    notifications.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    return {
+      count: notifications.length,
+      notifications: notifications.slice(0, 20),
     }
-
-    // Fetch all read notification records for this user
-    const readNotifications = await prisma.notificationRead.findMany({
-      where: { userId },
-      select: {
-        notificationType: true,
-        itemId: true,
-      },
-    })
-
-    // Create a Set for quick lookup
-    const readSet = new Set(
-      readNotifications.map(r => `${r.notificationType}:${r.itemId}`)
-    )
-
-    const notifications: Notification[] = []
-    let count = 0
-
-    // 1. Pending Proposal Approvals (internal)
-    // Optimize: Filter at database level where possible, add limit
-    const hasGeneralPermission = canApproveProposals(user)
-    const proposalWhere: any = {
-      status: "SUBMITTED",
-      internalApprovalRequired: true,
-      internalApprovalsComplete: false,
-      deletedAt: null,
-      // Exclude proposals where user has already approved/rejected (PENDING is OK)
-      NOT: {
-        approvals: {
-          some: {
-            approverId: userId,
-            status: { in: ["APPROVED", "REJECTED"] }
-          }
-        }
-      }
-    }
-
-    // For non-admin/manager users, we still need to filter by requiredApproverIds in memory
-    // but we can limit the dataset first
-    const allPendingProposals = await prisma.proposal.findMany({
-      where: proposalWhere,
-      take: 100, // Limit to prevent excessive queries
-      select: {
-        id: true,
-        title: true,
-        proposalNumber: true,
-        createdAt: true,
-        requiredApproverIds: true,
-        client: { select: { name: true, company: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    })
-
-    // Filter to only show proposals where user should see them (optimized filter)
-    const pendingProposalApprovals = allPendingProposals.filter(proposal => {
-      const isRequiredApprover = proposal.requiredApproverIds && proposal.requiredApproverIds.includes(userId)
-      const noSpecificApprovers = !proposal.requiredApproverIds || proposal.requiredApproverIds.length === 0
-      
-      if ((userRole === "ADMIN" || userRole === "MANAGER") && hasGeneralPermission) {
-        return true // Admins/Managers see all if they can approve
-      }
-      return isRequiredApprover || (noSpecificApprovers && hasGeneralPermission)
-    })
-
-    pendingProposalApprovals.forEach(proposal => {
-      // Check if this notification has been marked as read
-      if (!readSet.has(`proposal_approval:${proposal.id}`)) {
-        notifications.push({
-          type: "proposal_approval",
-          id: `proposal-${proposal.id}`,
-          itemId: proposal.id,
-          title: proposal.title,
-          proposalNumber: proposal.proposalNumber || undefined,
-          client: proposal.client,
-          createdAt: proposal.createdAt.toISOString(),
-        })
-        count++
-      }
-    })
-
-    // 2. Pending Invoice Approvals (internal)
-    // Optimize: Filter at database level where possible, add limit
-    const hasInvoicePermission = canApproveInvoices(user)
-    const invoiceWhere: any = {
-      status: "SUBMITTED",
-      internalApprovalRequired: true,
-      internalApprovalsComplete: false,
-      deletedAt: null,
-      // Exclude invoices where user has already approved/rejected (PENDING is OK)
-      NOT: {
-        approvals: {
-          some: {
-            approverId: userId,
-            status: { in: ["APPROVED", "REJECTED"] }
-          }
-        }
-      }
-    }
-
-    // For non-admin/manager users, we still need to filter by requiredApproverIds in memory
-    // but we can limit the dataset first
-    const allPendingInvoices = await prisma.bill.findMany({
-      where: invoiceWhere,
-      take: 100, // Limit to prevent excessive queries
-      select: {
-        id: true,
-        invoiceNumber: true,
-        createdAt: true,
-        requiredApproverIds: true,
-        client: { select: { name: true, company: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    })
-
-    // Filter to only show invoices where user should see them (optimized filter)
-    const pendingInvoiceApprovals = allPendingInvoices.filter(bill => {
-      const isRequiredApprover = bill.requiredApproverIds && bill.requiredApproverIds.includes(userId)
-      const noSpecificApprovers = !bill.requiredApproverIds || bill.requiredApproverIds.length === 0
-      
-      if ((userRole === "ADMIN" || userRole === "MANAGER") && hasInvoicePermission) {
-        return true // Admins/Managers see all if they can approve
-      }
-      return isRequiredApprover || (noSpecificApprovers && hasInvoicePermission)
-    })
-
-    pendingInvoiceApprovals.forEach(bill => {
-      // Check if this notification has been marked as read
-      if (!readSet.has(`invoice_approval:${bill.id}`)) {
-        notifications.push({
-          type: "invoice_approval",
-          id: `invoice-${bill.id}`,
-          itemId: bill.id,
-          title: `Invoice ${bill.invoiceNumber || bill.id}`,
-          invoiceNumber: bill.invoiceNumber || undefined,
-          client: bill.client,
-          createdAt: bill.createdAt.toISOString(),
-        })
-        count++
-      }
-    })
-
-    // 3. Proposals pending client approval (for Admins/Managers to override)
-    if (userRole === "ADMIN" || userRole === "MANAGER") {
-      const fiveDaysAgo = new Date()
-      fiveDaysAgo.setDate(fiveDaysAgo.getDate() - 5)
-
-      const proposalsPendingClientApproval = await prisma.proposal.findMany({
-        where: {
-          status: "APPROVED", // Internally approved
-          clientApprovalStatus: "PENDING",
-          clientApprovalEmailSent: true, // Only show if email was actually sent
-          clientApprovalEmailSentAt: {
-            not: null, // Must have a sent date
-          },
-        },
-        include: {
-          client: { select: { name: true, company: true } },
-        },
-        take: 20,
-      })
-
-      proposalsPendingClientApproval.forEach(proposal => {
-        // Check if email was sent more than 5 days ago
-        const isOverdue = proposal.clientApprovalEmailSentAt && 
-                         new Date(proposal.clientApprovalEmailSentAt) < fiveDaysAgo
-        const notificationType = isOverdue ? "proposal_pending_client_overdue" : "proposal_pending_client"
-        
-        // Check if this notification has been marked as read
-        if (!readSet.has(`${notificationType}:${proposal.id}`)) {
-          notifications.push({
-            type: notificationType,
-            id: `proposal-client-${proposal.id}`,
-            itemId: proposal.id,
-            title: proposal.title,
-            proposalNumber: proposal.proposalNumber || undefined,
-            client: proposal.client,
-            createdAt: proposal.createdAt.toISOString(),
-          })
-          count++
-        }
-      })
-    }
-
-    // 4. Todo assignments (only unread todos) - check both assignedTo and assignments
-    const unreadTodos = await prisma.todo.findMany({
-      where: {
-        OR: [
-          { assignedTo: userId },
-          { assignments: { some: { userId: userId } } },
-        ],
-        readAt: null, // Only show unread todos
-        status: { not: "COMPLETED" },
-      },
-      include: {
-        project: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        proposal: {
-          select: {
-            id: true,
-            title: true,
-            proposalNumber: true,
-          },
-        },
-        invoice: {
-          select: {
-            id: true,
-            invoiceNumber: true,
-          },
-        },
-        creator: {
-          select: {
-            name: true,
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-    })
-
-    unreadTodos.forEach(todo => {
-      notifications.push({
-        type: "todo_assignment",
-        id: `todo-${todo.id}`,
-        itemId: todo.id,
-        title: todo.title,
-        client: todo.project?.name ? { name: todo.project.name } : undefined,
-        createdAt: todo.createdAt.toISOString(),
-      })
-      count++
-    })
-
-    // 5. Outstanding invoices
-    const outstandingInvoiceNotifications = await getOutstandingInvoiceNotifications(userId)
-    outstandingInvoiceNotifications.forEach(notification => {
-      // Check if this notification has been marked as read
-      if (!readSet.has(`${notification.type}:${notification.itemId}`)) {
-        notifications.push(notification)
-        count++
-      }
-    })
-
-    // 6. Recurring payment notifications
-    // These are already filtered by readAt: null in the query, so they're implicitly checked
-    const recurringNotifications = await prisma.notification.findMany({
-      where: {
-        userId,
-        type: "RECURRING_PAYMENT_DUE",
-        readAt: null, // Only show unread notifications
-      },
-      include: {
-        proposal: {
-          select: {
-            id: true,
-            title: true,
-            proposalNumber: true,
-            client: {
-              select: {
-                name: true,
-                company: true,
-              },
-            },
-          },
-        },
-        proposalItem: {
-          select: {
-            id: true,
-            description: true,
-          },
-        },
-      },
-      orderBy: { dueDate: "asc" },
-      take: 10,
-    })
-
-    // Recurring notifications are already filtered by readAt: null in the query
-    // These use the Notification model directly, not NotificationRead
-    recurringNotifications.forEach(notification => {
-      notifications.push({
-        type: "recurring_payment_due",
-        id: notification.id,
-        itemId: notification.proposalId || notification.proposalItemId || "",
-        title: notification.title,
-        proposalNumber: notification.proposal?.proposalNumber || undefined,
-        client: notification.proposal?.client,
-        createdAt: notification.createdAt.toISOString(),
-      })
-      count++
-    })
-
-    // 7. Installment due notifications
-    // These are already filtered by readAt: null in the query, so they're implicitly checked
-    const installmentNotifications = await prisma.notification.findMany({
-      where: {
-        userId,
-        type: "INSTALLMENT_DUE",
-        readAt: null, // Only show unread notifications
-      },
-      include: {
-        proposal: {
-          select: {
-            id: true,
-            title: true,
-            proposalNumber: true,
-            client: {
-              select: {
-                name: true,
-                company: true,
-              },
-            },
-          },
-        },
-        proposalItem: {
-          select: {
-            id: true,
-            description: true,
-          },
-        },
-      },
-      orderBy: { dueDate: "asc" },
-      take: 10,
-    })
-
-    // Installment notifications are already filtered by readAt: null in the query
-    // These use the Notification model directly, not NotificationRead
-    installmentNotifications.forEach(notification => {
-      notifications.push({
-        type: "installment_due",
-        id: notification.id,
-        itemId: notification.proposalId || notification.proposalItemId || "",
-        title: notification.title,
-        proposalNumber: notification.proposal?.proposalNumber || undefined,
-        client: notification.proposal?.client,
-        createdAt: notification.createdAt.toISOString(),
-      })
-      count++
-    })
-
-    return { count, notifications: notifications.slice(0, 20) } // Limit to 20 most recent
   } catch (error) {
     console.error("Error fetching notifications:", error)
     return { count: 0, notifications: [] }
@@ -384,80 +31,57 @@ export async function createTodoNotification(
   assigneeId: string,
   creatorId: string
 ): Promise<void> {
-  try {
-    // Notification is created implicitly by the todo's readAt being null
-    // The getNotifications function will pick it up
-    // We could also create a separate Notification model if needed in the future
-  } catch (error) {
-    console.error("Error creating todo notification:", error)
-  }
+  // Todo notifications are disabled in internal-only mode.
+  void todoId
+  void assigneeId
+  void creatorId
 }
 
-/**
- * Create an outstanding invoice notification
- * This is tracked via the Notification interface and shown in getNotifications
- */
 export async function createOutstandingInvoiceNotification(
   billId: string,
   userId: string,
   reminderNumber: number = 0,
   isFirstTime: boolean = false
 ): Promise<void> {
-  try {
-    // Outstanding invoice notifications are handled via the getNotifications function
-    // which checks for outstanding invoices and includes them in the notification list
-    // This function is here for consistency and potential future use (e.g., email notifications)
-  } catch (error) {
-    console.error("Error creating outstanding invoice notification:", error)
-  }
+  // Outstanding invoice notifications are computed dynamically in getOutstandingInvoiceNotifications.
+  void billId
+  void userId
+  void reminderNumber
+  void isFirstTime
 }
 
-/**
- * Get outstanding invoice notifications for a user
- */
 export async function getOutstandingInvoiceNotifications(userId: string): Promise<Notification[]> {
   try {
-    const { prisma } = await import("@/lib/prisma")
-    const { getOutstandingInvoices, isInvoiceOutstanding } = await import("@/lib/invoice-helpers")
-    
+    const { getOutstandingInvoices } = await import("@/lib/invoice-helpers")
+    const { getOutstandingInvoiceRecipients } = await import("@/lib/invoice-notifications")
+
     const outstandingInvoices = await getOutstandingInvoices()
     const notifications: Notification[] = []
-    
-    // For each outstanding invoice, check if user should be notified
-    for (const invoice of outstandingInvoices) {
-      const { getOutstandingInvoiceRecipients } = await import("@/lib/invoice-notifications")
-      const recipients = await getOutstandingInvoiceRecipients(invoice as any)
-      
-      if (recipients.includes(userId)) {
-        // Handle both client and lead invoices
-        const clientOrLead = invoice.client || invoice.lead
-        if (!clientOrLead) {
-          continue // Skip invoices without client or lead
-        }
 
-        notifications.push({
-          type: invoice.becameOutstandingAt && 
-                invoice.lastReminderSentAt && 
-                new Date(invoice.lastReminderSentAt) > new Date(invoice.becameOutstandingAt)
-            ? "invoice_reminder"
-            : "invoice_outstanding",
-          id: `invoice-outstanding-${invoice.id}`,
-          itemId: invoice.id,
-          title: `Outstanding Invoice ${invoice.invoiceNumber || invoice.id}`,
-          invoiceNumber: invoice.invoiceNumber || undefined,
-          client: {
-            name: clientOrLead.name,
-            company: clientOrLead.company || undefined,
-          },
-          createdAt: invoice.becameOutstandingAt?.toISOString() || invoice.createdAt.toISOString(),
-        })
-      }
+    for (const invoice of outstandingInvoices) {
+      const recipients = await getOutstandingInvoiceRecipients(invoice as any)
+      if (!recipients.includes(userId)) continue
+
+      const clientOrLead = invoice.client || invoice.lead
+      if (!clientOrLead) continue
+
+      notifications.push({
+        type: "invoice_outstanding",
+        id: `invoice-outstanding-${invoice.id}`,
+        itemId: invoice.id,
+        title: `Outstanding Invoice ${invoice.invoiceNumber || invoice.id}`,
+        invoiceNumber: invoice.invoiceNumber || undefined,
+        client: {
+          name: clientOrLead.name,
+          company: clientOrLead.company || undefined,
+        },
+        createdAt: invoice.becameOutstandingAt?.toISOString() || invoice.createdAt.toISOString(),
+      })
     }
-    
+
     return notifications
   } catch (error) {
     console.error("Error fetching outstanding invoice notifications:", error)
     return []
   }
 }
-

@@ -53,7 +53,7 @@ export default function LoginPage() {
             <div className="p-2 rounded-xl bg-primary/10">
               <Scale className="h-8 w-8 text-primary" />
             </div>
-            <span className="text-2xl font-semibold tracking-tight">BillLex</span>
+            <span className="text-2xl font-semibold tracking-tight">Billlex Receivables</span>
           </div>
         </div>
 
@@ -119,7 +119,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="mt-6 text-center text-sm text-muted-foreground">
-          Proposal & Billing Management System
+          Billlex Receivables Management System
         </p>
       </div>
     </div>

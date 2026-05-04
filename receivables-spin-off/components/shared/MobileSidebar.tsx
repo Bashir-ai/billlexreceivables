@@ -16,13 +16,10 @@ import {
 } from "@/components/ui/sheet"
 import {
   LayoutDashboard,
-  FileText,
-  FolderKanban,
   Receipt,
   Users,
   Settings,
   LogOut,
-  CheckSquare,
   Wallet,
   BarChart3,
   UserPlus,
@@ -51,9 +48,6 @@ const navigationGroups = [
   {
     name: "Work",
     items: [
-      { name: "Proposals", href: "/dashboard/proposals", icon: FileText, roles: ["ADMIN", "MANAGER", "STAFF"] },
-      { name: "Projects", href: "/dashboard/projects", icon: FolderKanban, roles: ["ADMIN", "MANAGER", "STAFF"] },
-      { name: "ToDos", href: "/dashboard/todos", icon: CheckSquare, roles: ["ADMIN", "MANAGER", "STAFF"] },
       { name: "Invoices", href: "/dashboard/bills", icon: Receipt, roles: ["ADMIN", "MANAGER", "STAFF", "CLIENT"] },
     ],
   },
@@ -102,7 +96,7 @@ export function MobileHeader({ user }: MobileSidebarProps) {
           </Button>
           <Link href="/dashboard" className="flex items-center gap-2">
             <Scale className="h-5 w-5 text-primary" />
-            <span className="font-semibold">BillLex</span>
+            <span className="font-semibold">Billlex Receivables</span>
           </Link>
         </div>
         <div className="flex items-center gap-2">
@@ -117,7 +111,7 @@ export function MobileHeader({ user }: MobileSidebarProps) {
         <SheetContent side="left" className="w-72 p-0">
           <SheetHeader className="h-14 border-b border-border px-4 flex flex-row items-center justify-start gap-2">
             <Scale className="h-5 w-5 text-primary" />
-            <SheetTitle className="text-base font-semibold">BillLex</SheetTitle>
+            <SheetTitle className="text-base font-semibold">Billlex Receivables</SheetTitle>
           </SheetHeader>
           
           <nav className="flex-1 overflow-y-auto sidebar-scrollbar py-4 px-3">

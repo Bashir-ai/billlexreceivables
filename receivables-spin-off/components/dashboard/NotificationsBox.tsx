@@ -1,13 +1,19 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useSession } from "next-auth/react"
 import { Button } from "@/components/ui/button"
-import { AlertCircle, RefreshCw, Check, Plus } from "lucide-react"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
+import { AlertCircle, RefreshCw, Check } from "lucide-react"
 import Link from "next/link"
 import { formatDate, formatClientName, cn } from "@/lib/utils"
 import { ChevronDown, ChevronUp } from "lucide-react"
-import { toast } from "sonner"
 
 interface Notification {
   type: string
@@ -32,30 +38,18 @@ interface NotificationsBoxProps {
 }
 
 export function NotificationsBox({ initialCount, initialNotifications, isCollapsed = false, isFloating = false }: NotificationsBoxProps) {
-  // Load viewed notifications from localStorage on mount
-  const initialViewedNotifications = (() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem('viewedNotifications')
-        return stored ? new Set<string>(JSON.parse(stored) as string[]) : new Set<string>()
-      } catch (error) {
-        console.error("Error loading viewed notifications from localStorage:", error)
-        return new Set<string>()
-      }
-    }
-    return new Set<string>()
-  })()
+  const { data: session } = useSession()
+  const role = session?.user?.role
 
-  // Filter initial notifications using viewedNotifications Set
   const initialNotificationsArray = Array.isArray(initialNotifications) ? initialNotifications : []
-  const filteredInitialNotifications = initialNotificationsArray.filter(n => !initialViewedNotifications.has(n.id))
-  
-  const [notifications, setNotifications] = useState<Notification[]>(filteredInitialNotifications)
-  const [count, setCount] = useState(filteredInitialNotifications.length)
+  const [notifications, setNotifications] = useState<Notification[]>(initialNotificationsArray)
+  const [count, setCount] = useState(initialCount)
   const [isOpen, setIsOpen] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const [viewedNotifications, setViewedNotifications] = useState<Set<string>>(initialViewedNotifications)
+  /** Read / dismissed ids — merged from server read-status on refresh (no localStorage; avoids skew with DB) */
+  const [viewedNotifications, setViewedNotifications] = useState<Set<string>>(new Set())
   const [lastMarkedAsReadTime, setLastMarkedAsReadTime] = useState<number>(0)
+  const [opsCounts, setOpsCounts] = useState<{ collectionsCount: number; payrollCount: number } | null>(null)
 
   // Use a ref to track viewedNotifications for use in callbacks
   const viewedNotificationsRef = useRef(viewedNotifications)
@@ -65,17 +59,31 @@ export function NotificationsBox({ initialCount, initialNotifications, isCollaps
     viewedNotificationsRef.current = viewedNotifications
   }, [viewedNotifications])
 
-  // Save to localStorage whenever viewedNotifications changes
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem('viewedNotifications', JSON.stringify(Array.from(viewedNotifications)))
-      } catch (error) {
-        console.error("Error saving viewed notifications to localStorage:", error)
-        // localStorage might be full or disabled, continue without it
-      }
+    if (!role || role === "CLIENT") {
+      setOpsCounts(null)
+      return
     }
-  }, [viewedNotifications])
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/operations?countsOnly=true&t=${Date.now()}`, { cache: "no-store" })
+        if (!res.ok) return
+        const data = await res.json()
+        if (!cancelled && data && typeof data.collectionsCount === "number") {
+          setOpsCounts({
+            collectionsCount: data.collectionsCount,
+            payrollCount: data.payrollCount ?? 0,
+          })
+        }
+      } catch {
+        /* ignore */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [role])
 
   const refreshNotifications = useCallback(async () => {
     // Don't refresh if we just marked a notification as read (within last 5 seconds)
@@ -229,38 +237,19 @@ export function NotificationsBox({ initialCount, initialNotifications, isCollaps
   }, [refreshNotifications])
 
   const getNotificationLink = (notification: Notification): string => {
-    if (notification.type === "proposal_approval" || 
-        notification.type === "proposal_pending" || 
-        notification.type === "proposal_pending_client" ||
-        notification.type === "proposal_pending_client_overdue") {
-      return `/dashboard/proposals/${notification.itemId}`
-    } else if (notification.type === "invoice_approval" || 
-               notification.type === "invoice_pending") {
+    if (notification.type === "invoice_outstanding" || notification.type === "invoice_reminder") {
       return `/dashboard/bills/${notification.itemId}`
-    } else if (notification.type === "todo_assignment") {
-      return `/dashboard/todos`
     }
-    return "#"
+    return "/dashboard/bills?status=OUTSTANDING"
   }
 
   const getNotificationLabel = (notification: Notification): string => {
     switch (notification.type) {
-      case "proposal_approval":
-        return "Proposal approval required"
-      case "invoice_approval":
-        return "Invoice approval required"
-      case "proposal_pending":
-        return "Proposal pending your approval"
-      case "invoice_pending":
-        return "Invoice pending your approval"
-      case "proposal_pending_client":
-        return "Proposal pending client approval"
-      case "proposal_pending_client_overdue":
-        return "Proposal pending client approval (over 5 days)"
-      case "todo_assignment":
-        return "ToDo assigned to you"
+      case "invoice_outstanding":
+      case "invoice_reminder":
+        return "Outstanding invoice"
       default:
-        return "Action required"
+        return "Outstanding invoice"
     }
   }
 
@@ -397,7 +386,7 @@ export function NotificationsBox({ initialCount, initialNotifications, isCollaps
       <Button
         variant={displayCount > 0 ? "default" : "outline"}
         size={isFloating ? "default" : "sm"}
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={() => setIsOpen(true)}
         className={cn(
           "relative shadow-lg",
           displayCount > 0 && "bg-red-600 hover:bg-red-700 text-white",
@@ -405,7 +394,7 @@ export function NotificationsBox({ initialCount, initialNotifications, isCollaps
         )}
       >
         <AlertCircle className={cn("h-4 w-4", isFloating && "mr-2")} />
-        {(!isCollapsed || isFloating) && "Notifications"}
+        {(!isCollapsed || isFloating) && "Inbox"}
         {displayCount > 0 && (
           <span className={cn(
             "absolute bg-white text-red-600 text-xs font-bold rounded-full flex items-center justify-center",
@@ -416,68 +405,78 @@ export function NotificationsBox({ initialCount, initialNotifications, isCollaps
         )}
       </Button>
 
-      {isOpen && (
-        <Card className={cn(
-          "absolute w-80 z-50 max-h-96 overflow-y-auto shadow-2xl",
-          isFloating 
-            ? "bottom-full mb-2 right-0" 
-            : isCollapsed 
-              ? "mt-2 left-16" 
-              : "mt-2 right-0"
-        )}>
-          <CardHeader className="p-3">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base">Notifications</CardTitle>
-              <div className="flex items-center gap-2">
-                {unviewedNotifications.length > 0 && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleMarkAllAsViewed}
-                    className="h-7 px-2 text-xs"
-                  >
-                    Mark all viewed
+      <Sheet open={isOpen} onOpenChange={setIsOpen}>
+        <SheetContent
+          side="right"
+          className="w-full sm:max-w-md flex flex-col max-h-[90vh] gap-0 p-0 [&>button]:top-4"
+        >
+          <SheetHeader className="p-4 pb-2 space-y-1 border-b shrink-0 text-left">
+            <div className="flex items-start justify-between gap-2 pr-8">
+              <div>
+                <SheetTitle>Inbox</SheetTitle>
+                <SheetDescription>Outstanding reminders. Mark read is stored on the server.</SheetDescription>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {unviewedNotifications.length > 0 ? (
+                  <Button variant="ghost" size="sm" onClick={handleMarkAllAsViewed} className="h-8 px-2 text-xs">
+                    Mark all
                   </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={refreshNotifications}
-                  disabled={isRefreshing}
-                  className="h-7 w-7 p-0"
-                >
+                ) : null}
+                <Button variant="ghost" size="sm" onClick={() => refreshNotifications()} disabled={isRefreshing} className="h-8 w-8 p-0">
                   <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? "animate-spin" : ""}`} />
                 </Button>
               </div>
             </div>
-          </CardHeader>
-          <CardContent className="p-0">
+          </SheetHeader>
+          <div className="flex-1 overflow-y-auto min-h-0">
             {unviewedNotifications.length === 0 ? (
-              <div className="p-3 text-center text-gray-500 text-xs">
-                No pending notifications
-              </div>
+              <div className="p-6 text-center text-muted-foreground text-sm">No unread items.</div>
             ) : (
               <div className="divide-y">
-                {Array.isArray(unviewedNotifications) && unviewedNotifications.map((notification) => (
-                  <NotificationItem
-                    key={notification.id}
-                    notification={notification}
-                    getNotificationLabel={getNotificationLabel}
-                    getNotificationLink={getNotificationLink}
-                    onClose={() => setIsOpen(false)}
-                    onMarkAsViewed={() => handleMarkAsViewed(notification.id)}
-                    isViewed={viewedNotifications.has(notification.id)}
-                    onTodoCreated={() => {
-                      refreshNotifications()
-                      toast.success("Todo created from notification")
-                    }}
-                  />
-                ))}
+                {Array.isArray(unviewedNotifications) &&
+                  unviewedNotifications.map((notification) => (
+                    <NotificationItem
+                      key={notification.id}
+                      notification={notification}
+                      getNotificationLabel={getNotificationLabel}
+                      getNotificationLink={getNotificationLink}
+                      onClose={() => setIsOpen(false)}
+                      onMarkAsViewed={() => handleMarkAsViewed(notification.id)}
+                      isViewed={viewedNotifications.has(notification.id)}
+                    />
+                  ))}
               </div>
             )}
-          </CardContent>
-        </Card>
-      )}
+          </div>
+          <div className="border-t p-4 space-y-3 bg-muted/40 shrink-0">
+            {opsCounts ? (
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  asChild
+                  variant="outline"
+                  size="sm"
+                  className={cn("text-xs", opsCounts.collectionsCount > 0 && "border-amber-600 text-amber-900")}
+                >
+                  <Link href="/dashboard/operations">Collections ({opsCounts.collectionsCount})</Link>
+                </Button>
+                {(role === "ADMIN" || role === "MANAGER") ? (
+                  <Button asChild variant="outline" size="sm" className="text-xs">
+                    <Link href="/dashboard/operations?tab=payroll">Payroll ({opsCounts.payrollCount})</Link>
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            <p className="text-xs text-muted-foreground">
+              Operational queues (collections + payroll) live on the Operations hub — broader than this inbox list.
+            </p>
+            <Button asChild className="w-full" variant="secondary">
+              <Link href="/dashboard/operations" onClick={() => setIsOpen(false)}>
+                Open Operations hub →
+              </Link>
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   )
 }
@@ -489,7 +488,6 @@ function NotificationItem({
   onClose,
   onMarkAsViewed,
   isViewed,
-  onTodoCreated,
 }: {
   notification: Notification
   getNotificationLabel: (notification: Notification) => string
@@ -497,43 +495,13 @@ function NotificationItem({
   onClose: () => void
   onMarkAsViewed?: () => void
   isViewed?: boolean
-  onTodoCreated?: () => void
 }) {
   const [isExpanded, setIsExpanded] = useState(false)
-  const [isCreatingTodo, setIsCreatingTodo] = useState(false)
   const link = getNotificationLink(notification)
 
   const handleMarkAsViewed = async (e: React.MouseEvent) => {
     e.stopPropagation()
     await onMarkAsViewed?.()
-  }
-
-  const handleCreateTodo = async (e: React.MouseEvent) => {
-    e.stopPropagation()
-    setIsCreatingTodo(true)
-    try {
-      const response = await fetch("/api/notifications/create-todo", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          notificationId: notification.id,
-          notificationType: notification.type,
-          itemId: notification.itemId,
-        }),
-      })
-
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.error || "Failed to create todo")
-      }
-
-      onTodoCreated?.()
-    } catch (error: any) {
-      console.error("Error creating todo:", error)
-      toast.error(error.message || "Failed to create todo from notification")
-    } finally {
-      setIsCreatingTodo(false)
-    }
   }
 
   return (
@@ -603,26 +571,13 @@ function NotificationItem({
         </div>
       </div>
       <div className="px-3 pb-2 flex items-center justify-between gap-2">
-        {link !== "#" && (
-          <Link
-            href={link}
-            onClick={onClose}
-            className="text-xs text-blue-600 hover:text-blue-800 underline"
-          >
-            View Details →
-          </Link>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleCreateTodo}
-          disabled={isCreatingTodo}
-          className="h-6 px-2 text-xs"
-          title="Create Todo from this notification"
+        <Link
+          href={link}
+          onClick={onClose}
+          className="text-xs text-blue-600 hover:text-blue-800 underline"
         >
-          <Plus className="h-3 w-3 mr-1" />
-          {isCreatingTodo ? "Creating..." : "Create Todo"}
-        </Button>
+          View Details →
+        </Link>
       </div>
     </div>
   )

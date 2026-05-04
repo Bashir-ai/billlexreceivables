@@ -102,6 +102,15 @@ async function computeBalances(prisma: PrismaClient) {
   }
 }
 
+async function computeAttribution(prisma: PrismaClient) {
+  const [snapshotCount, participantCount, backfilledCount] = await Promise.all([
+    prisma.billAttributionSnapshot.count(),
+    prisma.billAttributionParticipant.count(),
+    prisma.billAttributionSnapshot.count({ where: { isBackfilled: true } }),
+  ])
+  return { snapshotCount, participantCount, backfilledCount }
+}
+
 async function main() {
   console.log("=== Reconciliation run ===")
   console.log(`now=${now.toISOString().slice(0, 10)}`)
@@ -125,6 +134,10 @@ async function main() {
     computeBalances(source),
     computeBalances(dest),
   ])
+  const [sourceAttribution, destAttribution] = await Promise.all([
+    computeAttribution(source),
+    computeAttribution(dest),
+  ])
 
   const report = {
     runAt: new Date().toISOString(),
@@ -134,12 +147,14 @@ async function main() {
       finderFees: sourceFinderFees,
       compensationEntries: sourceComp,
       balances: sourceBalances,
+      attribution: sourceAttribution,
     },
     dest: {
       outstanding: destOutstanding,
       finderFees: destFinderFees,
       compensationEntries: destComp,
       balances: destBalances,
+      attribution: destAttribution,
     },
     diffs: {
       outstandingCount: destOutstanding.totalCount - sourceOutstanding.totalCount,
@@ -149,6 +164,8 @@ async function main() {
       compensationEarned: destComp.totalEarned - sourceComp.totalEarned,
       compensationPaid: destComp.totalPaid - sourceComp.totalPaid,
       compensationBalance: destComp.totalBalance - sourceComp.totalBalance,
+      attributionSnapshots: destAttribution.snapshotCount - sourceAttribution.snapshotCount,
+      attributionRows: destAttribution.participantCount - sourceAttribution.participantCount,
     },
   }
 

@@ -3,8 +3,23 @@ import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
+import { BillStatus } from "@prisma/client"
 import { z } from "zod"
 import { canEditInvoice } from "@/lib/permissions"
+
+async function resyncFeesIfPaid(billId: string) {
+  const b = await prisma.bill.findUnique({
+    where: { id: billId },
+    select: { status: true },
+  })
+  if (b?.status !== BillStatus.PAID) return
+  try {
+    const { resyncFinderAndManagementFeesForPaidBill } = await import("@/lib/attribution-fee-resync")
+    await resyncFinderAndManagementFeesForPaidBill(billId)
+  } catch (e) {
+    console.error("resyncFeesIfPaid", billId, e)
+  }
+}
 
 const billItemSchema = z.object({
   description: z.string().min(1),
@@ -135,6 +150,8 @@ export async function POST(
         amount: total,
       },
     })
+
+    await resyncFeesIfPaid(id)
 
     return NextResponse.json(newItem, { status: 201 })
   } catch (error: any) {
@@ -282,6 +299,8 @@ export async function PUT(
       },
     })
 
+    await resyncFeesIfPaid(id)
+
     return NextResponse.json(updatedItem)
   } catch (error: any) {
     if (error instanceof z.ZodError) {
@@ -398,6 +417,8 @@ export async function DELETE(
         amount: total,
       },
     })
+
+    await resyncFeesIfPaid(id)
 
     return NextResponse.json({ message: "Item deleted" })
   } catch (error: any) {

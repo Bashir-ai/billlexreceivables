@@ -5,11 +5,35 @@ import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { UserRole, CompensationType } from "@prisma/client"
 import { z } from "zod"
+import { computeInvoiceNetAmountSync } from "@/lib/finder-fee-helpers"
+import { managementFeeLineFromPool, managementFeePoolDollars } from "@/lib/management-fee-helpers"
+import { computeMonthlyBaseSalaryForPeriod, firstYearBonusScale } from "@/lib/compensation-anchors"
+
+function endOfMonth(year: number, month: number) {
+  return new Date(year, month, 0, 23, 59, 59, 999)
+}
+
+function startOfMonth(year: number, month: number) {
+  return new Date(year, month - 1, 1, 0, 0, 0, 0)
+}
+
+function bonusDueThisMonth(
+  month: number,
+  frequency?: "MONTHLY" | "QUARTERLY" | "YEARLY" | null,
+  dueMonth?: number | null
+) {
+  const f = frequency || "MONTHLY"
+  if (f === "MONTHLY") return true
+  const anchor = dueMonth && dueMonth >= 1 && dueMonth <= 12 ? dueMonth : 12
+  if (f === "YEARLY") return month === anchor
+  return ((month - anchor + 12) % 3) === 0
+}
 
 const calculateSchema = z.object({
   year: z.number().int().min(2000).max(2100),
   month: z.number().int().min(1).max(12),
   bonusMultiplier: z.number().min(0).nullable().optional(),
+  forceRecalculate: z.boolean().optional(),
 })
 
 export async function POST(
@@ -53,20 +77,33 @@ export async function POST(
     const body = await request.json()
     const validatedData = calculateSchema.parse(body)
 
-    const { year, month, bonusMultiplier } = validatedData
+    const { year, month, bonusMultiplier, forceRecalculate } = validatedData
 
-    // Get active compensation for this period
-    const compensation = await prisma.userCompensation.findFirst({
+    const periodStartForLookup = startOfMonth(year, month)
+    const periodEndForLookup = endOfMonth(year, month)
+
+    // Prefer compensation active at period start (month anchor), then fallback
+    // to any record active during the period. This avoids mid-month overlap rows
+    // accidentally overriding full-month salary calculations.
+    let compensation = await prisma.userCompensation.findFirst({
       where: {
         userId,
-        effectiveFrom: { lte: new Date(year, month - 1, 1) },
-        OR: [
-          { effectiveTo: null },
-          { effectiveTo: { gte: new Date(year, month - 1, 1) } },
-        ],
+        effectiveFrom: { lte: periodStartForLookup },
+        OR: [{ effectiveTo: null }, { effectiveTo: { gte: periodStartForLookup } }],
       },
-      orderBy: { effectiveFrom: 'desc' },
+      orderBy: { effectiveFrom: "desc" },
     })
+
+    if (!compensation) {
+      compensation = await prisma.userCompensation.findFirst({
+        where: {
+          userId,
+          effectiveFrom: { lte: periodEndForLookup },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: periodStartForLookup } }],
+        },
+        orderBy: { effectiveFrom: "desc" },
+      })
+    }
 
     if (!compensation) {
       return NextResponse.json({ error: "No active compensation found for this period" }, { status: 404 })
@@ -83,7 +120,7 @@ export async function POST(
       },
     })
 
-    if (existingEntry) {
+    if (existingEntry && !forceRecalculate) {
       return NextResponse.json({ error: "Compensation entry already exists for this period" }, { status: 400 })
     }
 
@@ -91,21 +128,86 @@ export async function POST(
     let baseSalary = compensation.baseSalary ?? 0
     let bonusAmount: number | null = null
     let percentageEarnings: number | null = null
+    const periodStart = startOfMonth(year, month)
+    const periodEnd = endOfMonth(year, month)
+
+    const effectiveStartRaw = new Date(compensation.effectiveFrom)
+    const employmentStartRaw = (compensation as { employmentStartDate?: Date | null })
+      .employmentStartDate
+      ? new Date(
+          (compensation as { employmentStartDate?: Date | null }).employmentStartDate as Date
+        )
+      : null
+
+    // Monthly base: prorated to calendar days in the hire month (employment start), else legacy effectiveFrom.
+    const fullMonthly = compensation.baseSalary ?? 0
+    baseSalary = computeMonthlyBaseSalaryForPeriod({
+      year,
+      month,
+      fullMonthlyBase: fullMonthly,
+      employmentStartDate: employmentStartRaw,
+      effectiveFrom: effectiveStartRaw,
+    })
+
+    const fy = firstYearBonusScale({
+      year,
+      month,
+      employmentStartDate: employmentStartRaw,
+      effectiveFrom: effectiveStartRaw,
+    })
+
+    const bonusIsDue = bonusDueThisMonth(
+      month,
+      ((compensation as any).bonusDueFrequency as any) || "MONTHLY",
+      (compensation as any).bonusDueMonth ?? null
+    )
 
     if (compensation.compensationType === CompensationType.SALARY_BONUS) {
-      // Salary + Bonus calculation
+      // Base salary + bonus + finder add-ons (SALARY_BONUS; "Salary + Bonus + Finder")
       const multiplier = bonusMultiplier ?? 0
       if (multiplier < 0 || (compensation.maxBonusMultiplier && multiplier > compensation.maxBonusMultiplier)) {
         return NextResponse.json({ 
           error: `Bonus multiplier must be between 0 and ${compensation.maxBonusMultiplier}` 
         }, { status: 400 })
       }
-      bonusAmount = baseSalary * multiplier
-      totalEarned = baseSalary + bonusAmount
+      bonusAmount = bonusIsDue ? baseSalary * multiplier * fy : 0
+
+      const paidBills = await prisma.bill.findMany({
+        where: {
+          paidAt: { gte: periodStart, lte: periodEnd },
+          status: "PAID",
+          deletedAt: null,
+        },
+        include: {
+          items: { select: { amount: true, isCredit: true } },
+          attributionSnapshots: {
+            orderBy: { version: "desc" },
+            take: 1,
+            include: { rows: true },
+          },
+        },
+      })
+
+      const attributionBasis = (bill: (typeof paidBills)[number]) =>
+        computeInvoiceNetAmountSync({
+          subtotal: bill.subtotal,
+          discountPercent: bill.discountPercent,
+          discountAmount: bill.discountAmount,
+          items: bill.items,
+        })
+
+      const finderFromBills = paidBills.reduce((sum, bill) => {
+        const latest = bill.attributionSnapshots[0]
+        const row = latest?.rows.find((r) => r.userId === userId && r.role === "FINDER")
+        if (!row) return sum
+        const basis = attributionBasis(bill)
+        return sum + basis * ((row.splitPercent || 0) / 100) + (row.fixedAmount || 0)
+      }, 0)
+      const finderEarnings = finderFromBills + (compensation.finderFeeFixedAmount || 0)
+      percentageEarnings = finderEarnings
+      totalEarned = baseSalary + bonusAmount + finderEarnings
     } else if (compensation.compensationType === CompensationType.PERCENTAGE_BASED) {
-      // Percentage-based calculation
-      const periodStart = new Date(year, month - 1, 1)
-      const periodEnd = new Date(year, month, 0, 23, 59, 59)
+      // Percentage-based calculation (with optional fixed components)
 
       let projectTotalEarnings = 0
       let directWorkEarnings = 0
@@ -235,44 +337,192 @@ export async function POST(
         }
       }
 
-      percentageEarnings = projectTotalEarnings + directWorkEarnings
+      const fixedProjectComponent =
+        compensation.percentageType === "PROJECT_TOTAL" || compensation.percentageType === "BOTH"
+          ? compensation.projectFixedAmount || 0
+          : 0
+      const fixedDirectComponent =
+        compensation.percentageType === "DIRECT_WORK" || compensation.percentageType === "BOTH"
+          ? compensation.directWorkFixedAmount || 0
+          : 0
+
+      percentageEarnings = projectTotalEarnings + directWorkEarnings + fixedProjectComponent + fixedDirectComponent
       totalEarned = percentageEarnings
+    } else if (compensation.compensationType === CompensationType.SALARY_BONUS_FINDER_MANAGEMENT) {
+      const periodStart = new Date(year, month - 1, 1)
+      const periodEnd = new Date(year, month, 0, 23, 59, 59)
+      const paidBills = await prisma.bill.findMany({
+        where: {
+          paidAt: { gte: periodStart, lte: periodEnd },
+          status: "PAID",
+          deletedAt: null,
+        },
+        include: {
+          items: { select: { amount: true, isCredit: true } },
+          attributionSnapshots: {
+            orderBy: { version: "desc" },
+            take: 1,
+            include: { rows: true },
+          },
+        },
+      })
+
+      const attributionBasis = (bill: (typeof paidBills)[number]) =>
+        computeInvoiceNetAmountSync({
+          subtotal: bill.subtotal,
+          discountPercent: bill.discountPercent,
+          discountAmount: bill.discountAmount,
+          items: bill.items,
+        })
+
+      const finderAmount = paidBills.reduce((sum, bill) => {
+        const latest = bill.attributionSnapshots[0]
+        const row = latest?.rows.find((r) => r.userId === userId && r.role === "FINDER")
+        if (!row) return sum
+        const basis = attributionBasis(bill)
+        return sum + basis * ((row.splitPercent || 0) / 100) + (row.fixedAmount || 0)
+      }, 0)
+      const managementAmount = paidBills.reduce((sum, bill) => {
+        const latest = bill.attributionSnapshots[0]
+        const rows = (latest?.rows || []).filter(
+          (r) =>
+            r.userId === userId &&
+            (r.role === "CLIENT_MANAGER" || r.role === "PROJECT_MANAGER")
+        )
+        if (rows.length === 0) return sum
+        const basis = attributionBasis(bill)
+        const pool = managementFeePoolDollars(basis)
+        const roleAmount = rows.reduce(
+          (rowSum, row) =>
+            rowSum +
+            managementFeeLineFromPool(
+              pool,
+              row.splitPercent || 0,
+              row.fixedAmount || 0
+            ),
+          0
+        )
+        return sum + roleAmount
+      }, 0)
+
+      const rawFixed = bonusIsDue ? (compensation.bonusFixedAmount || 0) : 0
+      const rawPct =
+        bonusIsDue && (compensation.bonusPercent || 0) > 0
+          ? (baseSalary * (compensation.bonusPercent || 0)) / 100
+          : 0
+      bonusAmount = (rawFixed + rawPct) * fy
+      percentageEarnings = finderAmount + managementAmount
+      totalEarned =
+        baseSalary +
+        bonusAmount +
+        finderAmount +
+        managementAmount +
+        (compensation.finderFeeFixedAmount || 0) +
+        (compensation.managementFeeFixedAmount || 0)
     }
 
-    // Create compensation entry
-    const entry = await prisma.compensationEntry.create({
-      data: {
-        userId,
-        compensationId: compensation.id,
-        periodYear: year,
-        periodMonth: month,
-        baseSalary: compensation.baseSalary,
-        bonusMultiplier: bonusMultiplier ?? null,
-        bonusAmount,
-        percentageEarnings,
-        totalEarned,
-        totalPaid: 0,
-        balance: totalEarned,
-        calculatedAt: new Date(),
-      },
-    })
+    let entry
+    if (existingEntry && forceRecalculate) {
+      const preservedPaid = existingEntry.totalPaid || 0
+      const updatedBalance = totalEarned - preservedPaid
+      entry = await prisma.compensationEntry.update({
+        where: { id: existingEntry.id },
+        data: {
+          compensationId: compensation.id,
+          baseSalary,
+          bonusMultiplier: bonusMultiplier ?? null,
+          bonusAmount,
+          percentageEarnings,
+          totalEarned,
+          totalPaid: preservedPaid,
+          balance: updatedBalance,
+          calculatedAt: new Date(),
+        },
+      })
 
-    // Create transaction record
-    await prisma.userFinancialTransaction.create({
-      data: {
-        userId,
-        type: "COMPENSATION",
-        relatedId: entry.id,
-        relatedType: "COMPENSATION_ENTRY",
-        amount: totalEarned,
-        currency: "EUR", // TODO: Get from user settings
-        transactionDate: new Date(year, month - 1, 1),
-        description: `Compensation for ${year}-${month.toString().padStart(2, '0')}`,
-        createdBy: actingUserId,
-      },
-    })
+      const existingCompTx = await prisma.userFinancialTransaction.findFirst({
+        where: {
+          userId,
+          type: "COMPENSATION",
+          relatedId: existingEntry.id,
+          relatedType: "COMPENSATION_ENTRY",
+        },
+        orderBy: { createdAt: "asc" },
+      })
 
-    return NextResponse.json({ entry }, { status: 201 })
+      if (existingCompTx) {
+        await prisma.userFinancialTransaction.update({
+          where: { id: existingCompTx.id },
+          data: {
+            amount: totalEarned,
+            transactionDate: periodEnd,
+            description: `Compensation for ${year}-${month.toString().padStart(2, '0')}`,
+          },
+        })
+      } else {
+        await prisma.userFinancialTransaction.create({
+          data: {
+            userId,
+            type: "COMPENSATION",
+            relatedId: entry.id,
+            relatedType: "COMPENSATION_ENTRY",
+            amount: totalEarned,
+            currency: "EUR",
+            transactionDate: periodEnd,
+            description: `Compensation for ${year}-${month.toString().padStart(2, '0')}`,
+            createdBy: actingUserId,
+          },
+        })
+      }
+    } else {
+      // Create compensation entry
+      entry = await prisma.compensationEntry.create({
+        data: {
+          userId,
+          compensationId: compensation.id,
+          periodYear: year,
+          periodMonth: month,
+          baseSalary,
+          bonusMultiplier: bonusMultiplier ?? null,
+          bonusAmount,
+          percentageEarnings,
+          totalEarned,
+          totalPaid: 0,
+          balance: totalEarned,
+          calculatedAt: new Date(),
+        },
+      })
+
+      // Create transaction record
+      await prisma.userFinancialTransaction.create({
+        data: {
+          userId,
+          type: "COMPENSATION",
+          relatedId: entry.id,
+          relatedType: "COMPENSATION_ENTRY",
+          amount: totalEarned,
+          currency: "EUR", // TODO: Get from user settings
+          transactionDate: periodEnd,
+          description: `Compensation for ${year}-${month.toString().padStart(2, '0')}`,
+          createdBy: actingUserId,
+        },
+      })
+    }
+
+    return NextResponse.json(
+      {
+        entry,
+        debug: {
+          selectedCompensationId: compensation.id,
+          selectedCompensationType: compensation.compensationType,
+          selectedEffectiveFrom: compensation.effectiveFrom,
+          selectedEffectiveTo: compensation.effectiveTo,
+          selectedBaseSalary: compensation.baseSalary,
+          computedBaseSalary: baseSalary,
+        },
+      },
+      { status: 201 }
+    )
   } catch (error: any) {
     console.error("Error calculating compensation:", error)
     if (error instanceof z.ZodError) {

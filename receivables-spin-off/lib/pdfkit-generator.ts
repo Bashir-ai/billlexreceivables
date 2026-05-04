@@ -27,6 +27,15 @@ function formatCurrency(amount: number, currency: string): string {
   return `${symbol}${amount.toFixed(2)}`
 }
 
+function formatCurrencyPt(amount: number, currency: string): string {
+  const symbol = getCurrencySymbol(currency)
+  const safeAmount = Number.isFinite(amount) ? amount : 0
+  return `${symbol} ${safeAmount.toLocaleString("pt-PT", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
+
 // Helper function to format date
 function formatDate(date: Date | string | null): string {
   if (!date) return ""
@@ -43,7 +52,17 @@ function formatDatePortuguese(date: Date | string | null): string {
   const d = new Date(date)
   const months = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", 
                   "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
-  return `${d.getDate()} de ${months[d.getMonth()]} ${d.getFullYear()}`
+  return `${d.getDate()} de ${months[d.getMonth()]} de ${d.getFullYear()}`
+}
+
+function formatDurationCell(hours: number | null | undefined): string {
+  if (hours === null || hours === undefined || Number.isNaN(hours)) return "-"
+  const rounded = Math.max(0, hours)
+  const totalMinutes = Math.round(rounded * 60)
+  const hh = Math.floor(totalMinutes / 60)
+  const mm = totalMinutes % 60
+  const decimal = rounded.toLocaleString("pt-PT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return `${decimal} (${hh}:${mm.toString().padStart(2, "0")})`
 }
 
 // Helper function to get currency name
@@ -656,10 +675,9 @@ export async function generateInvoicePdf(bill: any, logoBase64: string | null): 
       
       let y = MARGIN
       const currency = bill.project?.currency || bill.proposal?.currency || "EUR"
-      const currencySymbol = getCurrencySymbol(currency)
       
       // Calculate totals
-      const subtotal = bill.subtotal || bill.items.reduce((sum: number, item: any) => sum + item.amount, 0)
+      const subtotal = bill.subtotal || (bill.items || []).reduce((sum: number, item: any) => sum + item.amount, 0)
       const discount = bill.discountAmount || (bill.discountPercent ? (subtotal * bill.discountPercent / 100) : 0)
       const afterDiscount = subtotal - discount
       const taxAmount = bill.taxRate && bill.taxRate > 0
@@ -668,34 +686,29 @@ export async function generateInvoicePdf(bill: any, logoBase64: string | null): 
             : (afterDiscount * bill.taxRate / 100))
         : 0
       const total = bill.amount || (bill.taxInclusive ? afterDiscount : afterDiscount + taxAmount)
+      const amountDue = bill.status === "PAID" ? 0 : total
+      const paymentDate = bill.paidAt || bill.dueDate || bill.createdAt
+      const billTo = bill.client || bill.lead
       
-      // Company information (hardcoded for now)
+      // Company information
       const companyName = "VENTURE PARTNERS ADVOGADOS"
       const companyAddress1 = "Rua Projectada à Matinha, Prédio A, 1º B"
       const companyAddress2 = "1950-327 Lisboa"
       const companyCountry = "Portugal"
       
       // Two-column header layout
-      const headerLeftWidth = CONTENT_WIDTH * 0.45
-      const headerRightWidth = CONTENT_WIDTH * 0.55
-      const headerRightX = MARGIN + headerLeftWidth + 20
+      const leftWidth = CONTENT_WIDTH * 0.48
+      const rightWidth = CONTENT_WIDTH * 0.52
+      const rightX = MARGIN + leftWidth
       
-      // Left column: Logo + Company name
-      let headerY = y
+      // Left column: logo and name
+      let leftY = y
       if (logoBase64) {
         try {
           const base64Data = logoBase64.replace(/^data:image\/\w+;base64,/, "")
           const logoBuffer = Buffer.from(base64Data, 'base64')
-          const mimeMatch = logoBase64.match(/^data:image\/(\w+);base64,/)
-          const format = mimeMatch ? mimeMatch[1] : 'png'
-          
-          if (format === 'png' || format === 'jpeg' || format === 'jpg') {
-            doc.image(logoBuffer, MARGIN, headerY, { 
-              fit: [150, 60],
-              align: 'left'
-            })
-            headerY += 65
-          }
+          doc.image(logoBuffer, MARGIN, leftY, { fit: [200, 80], align: "left" })
+          leftY += 85
         } catch (error) {
           console.error("Error adding logo to PDF:", error)
         }
@@ -703,163 +716,104 @@ export async function generateInvoicePdf(bill: any, logoBase64: string | null): 
       
       doc.fontSize(12)
         .fillColor('#111827')
-        .text(companyName, MARGIN, headerY, { width: headerLeftWidth })
+        .text(companyName, MARGIN, leftY, { width: leftWidth - 10 })
       
-      // Right column: Title + Metadata
-      const rightStartY = y
-      doc.fontSize(24)
-        .fillColor('#2563eb')
-        .text("INVOICE", headerRightX, rightStartY, { width: headerRightWidth })
-      
-      let rightY = rightStartY + 35
-      
-      if (bill.invoiceNumber) {
-        doc.fontSize(10)
-          .fillColor('#111827')
-          .text(`Invoice Number: ${bill.invoiceNumber}`, headerRightX, rightY, { width: headerRightWidth })
-        rightY += 15
-      }
-      
-      doc.fontSize(10)
+      // Right column: title and metadata
+      doc.fontSize(34)
         .fillColor('#111827')
-        .text(`Issue Date: ${formatDate(bill.createdAt)}`, headerRightX, rightY, { width: headerRightWidth })
-      rightY += 15
+        .text("Nota de Honorários", rightX, y + 5, { width: rightWidth - 10 })
       
-      const paymentDate = bill.paidAt || bill.dueDate || bill.createdAt
-      doc.fontSize(10)
-        .fillColor('#111827')
-        .text(`Payment Date: ${formatDate(paymentDate)}`, headerRightX, rightY, { width: headerRightWidth })
-      rightY += 15
-      
-      const currencyName = getCurrencyName(currency)
-      doc.fontSize(10)
-        .fillColor('#111827')
-        .text(`Currency: ${currency} - ${currencyName}`, headerRightX, rightY, { width: headerRightWidth })
-      
-      // Set y to the bottom of the header section
-      y = Math.max(headerY + 20, rightY + 10) + 20
+      let metaY = y + 52
+      const labelX = rightX
+      const valueX = rightX + 105
+      const lineHeight = 16
+      const metaRows = [
+        { label: "Nota", value: bill.invoiceNumber || bill.id },
+        { label: "Data de Emissão", value: formatDatePortuguese(bill.createdAt) },
+        { label: "Data de Pagamento", value: formatDatePortuguese(paymentDate) },
+        { label: "Moeda", value: `${currency} - ${getCurrencyName(currency)}` },
+      ]
+      metaRows.forEach((row) => {
+        doc.fontSize(10).fillColor("#6b7280").text(row.label, labelX, metaY, { width: 95 })
+        doc.fontSize(10).fillColor("#111827").text(row.value, valueX, metaY, { width: rightWidth - 110 })
+        metaY += lineHeight
+      })
+
+      y = Math.max(leftY + 30, metaY + 15)
       
       // Two-column parties section
       checkPageBreak(doc, 100)
       
-      const partiesLeftWidth = CONTENT_WIDTH * 0.45
-      const partiesRightWidth = CONTENT_WIDTH * 0.55
-      const partiesRightX = MARGIN + partiesLeftWidth + 20
+      const partiesLeftWidth = CONTENT_WIDTH * 0.48
+      const partiesRightWidth = CONTENT_WIDTH * 0.52
+      const partiesRightX = MARGIN + partiesLeftWidth
       
-      // Left column: Para (To)
-      doc.fontSize(12)
-        .fillColor('#111827')
-        .text("Bill To", MARGIN, y)
+      doc.fontSize(10).fillColor("#6b7280").text("Para", MARGIN, y)
       
-      let paraY = y + 18
-      const billTo = bill.client || bill.lead
+      let paraY = y + 16
       if (billTo) {
-        doc.fontSize(10)
-          .fillColor('#111827')
-          .text(billTo.name || billTo.company || "", MARGIN, paraY, { width: partiesLeftWidth })
-        
-        if (billTo.company && billTo.name !== billTo.company) {
-          paraY += 15
-          doc.fontSize(10)
-            .fillColor('#111827')
-            .text(billTo.company, MARGIN, paraY, { width: partiesLeftWidth })
-        }
-        
-        // For clients, show tax numbers
-        if (bill.client && (bill.client.portugueseTaxNumber || bill.client.foreignTaxNumber)) {
-          paraY += 15
-          const taxNumber = bill.client.portugueseTaxNumber || bill.client.foreignTaxNumber || ""
-          doc.fontSize(10)
-            .fillColor('#111827')
-            .text(taxNumber, MARGIN, paraY, { width: partiesLeftWidth })
-        }
-        
-        // Address information
+        const toLines = [
+          billTo.name || billTo.company || "",
+          billTo.company && billTo.name !== billTo.company ? billTo.company : "",
+          bill.client?.portugueseTaxNumber || bill.client?.foreignTaxNumber || "",
+        ].filter(Boolean)
+
         const addressLine = bill.client?.billingAddressLine || bill.lead?.addressLine
         const city = bill.client?.billingCity || bill.lead?.city
         const state = bill.client?.billingState || bill.lead?.state
         const zipCode = bill.client?.billingZipCode || bill.lead?.zipCode
         const country = bill.client?.billingCountry || bill.lead?.country
-        
-        if (addressLine || city || state || zipCode || country) {
-          paraY += 15
-          const addressParts = [addressLine, city, state, zipCode, country].filter(Boolean)
-          doc.fontSize(10)
-            .fillColor('#111827')
-            .text(addressParts.join(", "), MARGIN, paraY, { width: partiesLeftWidth })
-        }
+        const addressParts = [addressLine, city, state, zipCode, country].filter(Boolean)
+        if (addressParts.length) toLines.push(addressParts.join(", "))
+
+        toLines.forEach((line) => {
+          doc.fontSize(10).fillColor("#111827").text(line, MARGIN, paraY, { width: partiesLeftWidth - 10 })
+          paraY = doc.y + 2
+        })
       }
       
-      // Right column: De (From)
-      doc.fontSize(12)
-        .fillColor('#111827')
-        .text("From", partiesRightX, y, { width: partiesRightWidth })
+      doc.fontSize(10).fillColor("#6b7280").text("De", partiesRightX, y, { width: partiesRightWidth - 10 })
       
-      let deY = y + 18
-      doc.fontSize(10)
-        .fillColor('#111827')
-        .text("Venture Partners Advogados", partiesRightX, deY, { width: partiesRightWidth })
-      
-      deY += 15
-      doc.fontSize(10)
-        .fillColor('#111827')
-        .text(companyAddress1, partiesRightX, deY, { width: partiesRightWidth })
-      
-      deY += 15
-      doc.fontSize(10)
-        .fillColor('#111827')
-        .text(companyAddress2, partiesRightX, deY, { width: partiesRightWidth })
-      
-      deY += 15
-      doc.fontSize(10)
-        .fillColor('#111827')
-        .text(companyCountry, partiesRightX, deY, { width: partiesRightWidth })
+      let deY = y + 16
+      ;[companyName, companyAddress1, companyAddress2, companyCountry].forEach((line) => {
+        doc.fontSize(10).fillColor("#111827").text(line, partiesRightX, deY, { width: partiesRightWidth - 10 })
+        deY = doc.y + 2
+      })
       
       y = Math.max(paraY, deY) + 20
+
+      // Subject line
+      doc.fontSize(10).fillColor("#6b7280").text("Assunto", MARGIN, y)
+      doc.fontSize(10).fillColor("#111827").text(bill.description || bill.proposal?.title || "-", MARGIN + 70, y, {
+        width: CONTENT_WIDTH - 70,
+      })
+      y = doc.y + 18
       
-      // Geral (General) Section with Line Items
+      // Time table section
       if (bill.items && bill.items.length > 0) {
         checkPageBreak(doc, 150)
         
-        doc.fontSize(14)
+        doc.fontSize(30)
           .fillColor('#111827')
-          .text("Line Items", MARGIN, doc.y + 10)
+          .text("Quadro de horário", MARGIN, y)
         
-        y = doc.y + 15
-        
-        const hasQuantity = bill.items.some((item: any) => item.quantity)
-        const hasRate = bill.items.some((item: any) => item.rate || item.unitPrice)
-        
+        y = doc.y + 10
         const colWidths = {
-          type: CONTENT_WIDTH * 0.15,
-          desc: CONTENT_WIDTH * 0.35,
-          qty: hasQuantity ? CONTENT_WIDTH * 0.12 : 0,
-          rate: hasRate ? CONTENT_WIDTH * 0.15 : 0,
-          amount: CONTENT_WIDTH * 0.23,
+          type: CONTENT_WIDTH * 0.16,
+          desc: CONTENT_WIDTH * 0.45,
+          duration: CONTENT_WIDTH * 0.13,
+          unitPrice: CONTENT_WIDTH * 0.13,
+          amount: CONTENT_WIDTH * 0.13,
         }
-        
-        // Adjust widths if some columns are missing
-        if (!hasQuantity && !hasRate) {
-          colWidths.desc = CONTENT_WIDTH * 0.55
-          colWidths.amount = CONTENT_WIDTH * 0.30
-        } else if (!hasQuantity) {
-          colWidths.desc = CONTENT_WIDTH * 0.42
-          colWidths.amount = CONTENT_WIDTH * 0.28
-        } else if (!hasRate) {
-          colWidths.desc = CONTENT_WIDTH * 0.47
-          colWidths.amount = CONTENT_WIDTH * 0.26
-        }
-        
+
         const headerCols: Array<{ text: string; width: number; align?: 'left' | 'right' | 'center' }> = [
-          { text: "Type", width: colWidths.type },
-          { text: "Description", width: colWidths.desc },
+          { text: "Tipo", width: colWidths.type },
+          { text: "Descrição", width: colWidths.desc },
+          { text: "Duração", width: colWidths.duration, align: "right" },
+          { text: "Preço unitário", width: colWidths.unitPrice, align: "right" },
+          { text: "Valor", width: colWidths.amount, align: "right" },
         ]
-        
-        if (hasQuantity) headerCols.push({ text: "Quantity", width: colWidths.qty, align: 'right' })
-        if (hasRate) headerCols.push({ text: "Unit Price", width: colWidths.rate, align: 'right' })
-        headerCols.push({ text: "Amount", width: colWidths.amount, align: 'right' })
-        
-        // Table header with orange background
+
         const rowHeight = 25
         let x = MARGIN
         headerCols.forEach((col) => {
@@ -887,91 +841,74 @@ export async function generateInvoicePdf(bill: any, logoBase64: string | null): 
         // Table rows
         bill.items.forEach((item: any) => {
           checkPageBreak(doc, 30)
-          
+
+          const lineType = item.type?.toLowerCase().includes("time") ? "Timesheet" : (item.type || "Serviço")
+          const unitRate = item.rate || item.unitPrice || (item.quantity ? item.amount / item.quantity : 0)
+          const durationHours = item.billedHours ?? item.quantity ?? null
           const rowCols: Array<{ text: string; width: number; align?: 'left' | 'right' | 'center' }> = [
-            { text: item.type || "Service", width: colWidths.type },
+            { text: lineType, width: colWidths.type },
             { text: item.description || "-", width: colWidths.desc },
+            { text: formatDurationCell(durationHours), width: colWidths.duration, align: "right" },
+            { text: unitRate ? formatCurrencyPt(unitRate, currency) : "-", width: colWidths.unitPrice, align: "right" },
+            { text: `${item.isCredit ? "-" : ""}${formatCurrencyPt(Math.abs(item.amount), currency)}`, width: colWidths.amount, align: "right" },
           ]
-          
-          if (hasQuantity) rowCols.push({ text: item.quantity?.toString() || "1", width: colWidths.qty, align: 'right' })
-          if (hasRate) {
-            const rateValue = item.rate || item.unitPrice || 0
-            rowCols.push({ text: rateValue ? formatCurrency(rateValue, currency) : "-", width: colWidths.rate, align: 'right' })
-          }
-          rowCols.push({ 
-            text: `${item.isCredit ? '-' : ''}${formatCurrency(Math.abs(item.amount), currency)}`, 
-            width: colWidths.amount, 
-            align: 'right' 
-          })
-          
           y = drawTableRow(doc, y, rowCols)
         })
         
-        // Subtotal row within the table
+        // Subtotal row
         checkPageBreak(doc, 30)
+        const totalDurationHours = (bill.items || []).reduce((sum: number, item: any) => {
+          const rowHours = item.billedHours ?? item.quantity ?? 0
+          return sum + (typeof rowHours === "number" ? rowHours : 0)
+        }, 0)
+
         const subtotalRowCols: Array<{ text: string; width: number; align?: 'left' | 'right' | 'center' }> = [
           { text: "", width: colWidths.type },
           { text: "Subtotal", width: colWidths.desc },
+          { text: formatDurationCell(totalDurationHours), width: colWidths.duration, align: "right" },
+          { text: "", width: colWidths.unitPrice, align: "right" },
+          { text: formatCurrencyPt(subtotal, currency), width: colWidths.amount, align: "right" },
         ]
-        
-        if (hasQuantity) {
-          const totalQty = bill.items.reduce((sum: number, item: any) => sum + (item.quantity || 0), 0)
-          subtotalRowCols.push({ text: totalQty.toString(), width: colWidths.qty, align: 'right' })
-        }
-        if (hasRate) {
-          subtotalRowCols.push({ text: "", width: colWidths.rate, align: 'right' })
-        }
-        subtotalRowCols.push({ 
-          text: formatCurrency(subtotal, currency), 
-          width: colWidths.amount, 
-          align: 'right' 
-        })
         
         y = drawTableRow(doc, y, subtotalRowCols)
         
-        y += 10
+        y += 18
       }
       
-      // Financial Summary
+      // Financial summary (right-aligned block)
       checkPageBreak(doc, 100)
-      
-      y = doc.y + 15
-      
-      doc.fontSize(10)
-        .fillColor('#111827')
-        .text(`Subtotal: ${formatCurrency(subtotal, currency)}`, MARGIN, y)
-      y = doc.y + 10
-      
-      if (bill.taxRate && bill.taxRate > 0 && taxAmount > 0) {
-        doc.fontSize(10)
-          .fillColor('#111827')
-          .text(`Tax (${bill.taxRate}%): ${formatCurrency(taxAmount, currency)}`, MARGIN, y)
-        y = doc.y + 10
+      const summaryLabelX = MARGIN + CONTENT_WIDTH * 0.60
+      const summaryValueX = MARGIN + CONTENT_WIDTH * 0.82
+      y = y + 5
+      const summaryLine = (label: string, value: string, bold = false) => {
+        doc.fontSize(bold ? 12 : 10).fillColor("#111827").text(label, summaryLabelX, y, { width: CONTENT_WIDTH * 0.2 })
+        doc.fontSize(bold ? 12 : 10).fillColor("#111827").text(value, summaryValueX, y, {
+          width: CONTENT_WIDTH * 0.18,
+          align: "right",
+        })
+        y += bold ? 24 : 18
       }
-      
-      doc.fontSize(12)
-        .fillColor('#111827')
-        .text(`Total Amount: ${formatCurrency(total, currency)}`, MARGIN, y)
-      
-      y = doc.y + 20
-      
-      // Valor Devido (Amount Due) Section
-      checkPageBreak(doc, 50)
-      
-      doc.fontSize(14)
-        .fillColor('#111827')
-        .text("Amount Due", MARGIN, y)
-      
-      y = doc.y + 10
-      
-      doc.fontSize(16)
-        .fillColor('#111827')
-        .text(formatCurrency(total, currency), MARGIN, y)
-      
-      y = doc.y + 25
+      summaryLine("Subtotal", formatCurrencyPt(subtotal, currency))
+      if (bill.taxRate && bill.taxRate > 0 && taxAmount > 0) {
+        summaryLine(`IVA aplicável à taxa de ${bill.taxRate}%`, formatCurrencyPt(taxAmount, currency))
+      }
+      summaryLine("Montante total", formatCurrencyPt(total, currency), true)
+
+      if (bill.status === "PAID") {
+        summaryLine(`Menos pagamento de ${formatDatePortuguese(bill.paidAt || paymentDate)}`, `(${formatCurrencyPt(total, currency)})`)
+      }
+
+      y += 6
+      doc.rect(MARGIN, y, CONTENT_WIDTH, 30).fillColor("#f3f4f6").fill()
+      doc.fontSize(13).fillColor("#111827").text("Valor Devido", MARGIN + 10, y + 9)
+      doc.fontSize(13).fillColor("#111827").text(formatCurrencyPt(amountDue, currency), MARGIN, y + 9, {
+        width: CONTENT_WIDTH - 10,
+        align: "right",
+      })
+      y += 45
       
       // Notas (Notes) Section with Bank Details
-      if (bill.paymentDetails) {
+      if (bill.paymentDetails || bill.paymentDetails?.details) {
         checkPageBreak(doc, 80)
         
         doc.fontSize(14)
@@ -987,7 +924,7 @@ export async function generateInvoicePdf(bill: any, logoBase64: string | null): 
         y = doc.y + 10
         
         // Parse bank details from paymentDetails.details
-        const detailsText = bill.paymentDetails.details || ""
+        const detailsText = bill.paymentDetails?.details || ""
         
         // Try to extract structured information
         const nameMatch = detailsText.match(/Nome[:\s]+([^\n\r]+)/i) || 
@@ -1001,22 +938,16 @@ export async function generateInvoicePdf(bill: any, logoBase64: string | null): 
         const iban = ibanMatch ? ibanMatch[1].trim() : ""
         const bic = bicMatch ? bicMatch[1].trim() : ""
         
-        doc.fontSize(10)
-          .fillColor('#111827')
-          .text(`Name: ${bankName}`, MARGIN, y)
+        doc.fontSize(10).fillColor('#111827').text(`Nome: ${bankName}`, MARGIN, y)
         
         if (iban) {
           y = doc.y + 10
-          doc.fontSize(10)
-            .fillColor('#111827')
-            .text(`IBAN: ${iban}`, MARGIN, y)
+          doc.fontSize(10).fillColor('#111827').text(`IBAN: ${iban}`, MARGIN, y)
         }
         
         if (bic) {
           y = doc.y + 10
-          doc.fontSize(10)
-            .fillColor('#111827')
-            .text(`BIC/SWIFT: ${bic}`, MARGIN, y)
+          doc.fontSize(10).fillColor('#111827').text(`BIC/SWIFT: ${bic}`, MARGIN, y)
         }
         
         // If no structured data found, display as-is
@@ -1040,9 +971,7 @@ export async function generateInvoicePdf(bill: any, logoBase64: string | null): 
         .lineWidth(0.5)
         .stroke()
       
-      doc.fontSize(9)
-        .fillColor('#6b7280')
-        .text(`Generated on ${formatDate(new Date())}`, MARGIN, PAGE_HEIGHT - MARGIN - 15)
+      doc.fontSize(9).fillColor('#6b7280').text(`Gerado em ${formatDatePortuguese(new Date())}`, MARGIN, PAGE_HEIGHT - MARGIN - 15)
       
       doc.end()
     } catch (error) {

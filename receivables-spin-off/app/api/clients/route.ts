@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma"
 import { z } from "zod"
 import { isDatabaseConnectionError, getDatabaseErrorMessage } from "@/lib/database-error-handler"
 import { generateClientCode } from "@/lib/client-code"
+import { ManagementAttributionRole } from "@prisma/client"
 
 const contactPersonSchema = z.object({
   id: z.string().optional(),
@@ -19,6 +20,13 @@ const contactPersonSchema = z.object({
 const clientFinderSchema = z.object({
   userId: z.string().min(1),
   finderFeePercent: z.number().min(0).max(100).default(0),
+})
+
+const clientManagementSplitSchema = z.object({
+  userId: z.string().min(1),
+  role: z.enum(["CLIENT_MANAGER", "PROJECT_MANAGER"]),
+  splitPercent: z.number().min(0).max(100).default(0),
+  fixedAmount: z.number().min(0).nullable().optional(),
 })
 
 const clientSchema = z.object({
@@ -41,6 +49,7 @@ const clientSchema = z.object({
   referrerName: z.string().optional().nullable(),
   referrerContactInfo: z.string().optional().nullable(),
   finders: z.array(clientFinderSchema).optional(),
+  managementSplits: z.array(clientManagementSplitSchema).optional(),
   contacts: z.array(contactPersonSchema).optional(),
 })
 
@@ -62,6 +71,19 @@ export async function GET(request: Request) {
       archivedAt: null, // Exclude archived clients
     }
 
+    let supportsManagementSplits = false
+    try {
+      await prisma.client.findFirst({
+        include: {
+          managementSplits: {
+            take: 1,
+          },
+        },
+      } as any)
+      supportsManagementSplits = true
+    } catch (probeError: any) {
+    }
+
     const [clients, total] = await Promise.all([
       prisma.client.findMany({
         where,
@@ -80,6 +102,15 @@ export async function GET(request: Request) {
               user: { select: { id: true, name: true, email: true } },
             },
           },
+          ...(supportsManagementSplits
+            ? {
+                managementSplits: {
+                  include: {
+                    user: { select: { id: true, name: true, email: true } },
+                  },
+                },
+              }
+            : {}),
           clientManager: { select: { id: true, name: true, email: true } },
         },
       }),
@@ -132,6 +163,20 @@ export async function POST(request: Request) {
 
     const body = await request.json()
     const validatedData = clientSchema.parse(body)
+    const managementSplits = validatedData.managementSplits || []
+    const byRole = {
+      CLIENT_MANAGER: managementSplits.filter((s) => s.role === "CLIENT_MANAGER"),
+      PROJECT_MANAGER: managementSplits.filter((s) => s.role === "PROJECT_MANAGER"),
+    }
+    for (const [role, rows] of Object.entries(byRole)) {
+      const total = rows.reduce((sum, row) => sum + row.splitPercent, 0)
+      if (total > 100.0001) {
+        return NextResponse.json(
+          { error: `${role} split percentage cannot exceed 100` },
+          { status: 400 }
+        )
+      }
+    }
 
     // Generate client code if not provided, or validate if provided
     let clientCode: number
@@ -177,6 +222,16 @@ export async function POST(request: Request) {
               create: validatedData.finders.map((finder) => ({
                 userId: finder.userId,
                 finderFeePercent: finder.finderFeePercent,
+              })),
+            }
+          : undefined,
+        managementSplits: managementSplits.length > 0
+          ? {
+              create: managementSplits.map((split) => ({
+                userId: split.userId,
+                role: split.role as ManagementAttributionRole,
+                splitPercent: split.splitPercent,
+                fixedAmount: split.fixedAmount ?? null,
               })),
             }
           : undefined,

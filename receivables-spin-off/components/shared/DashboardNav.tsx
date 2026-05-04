@@ -7,13 +7,10 @@ import { Button } from "@/components/ui/button"
 import { UserRole } from "@prisma/client"
 import { 
   LayoutDashboard, 
-  FileText, 
-  FolderKanban,
   Receipt, 
   Users, 
   Settings,
   LogOut,
-  CheckSquare,
   Wallet,
   BarChart3,
   UserPlus
@@ -30,9 +27,6 @@ interface DashboardNavProps {
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard, roles: ["ADMIN", "MANAGER", "STAFF", "CLIENT"] },
-  { name: "Proposals", href: "/dashboard/proposals", icon: FileText, roles: ["ADMIN", "MANAGER", "STAFF"] },
-  { name: "Projects", href: "/dashboard/projects", icon: FolderKanban, roles: ["ADMIN", "MANAGER", "STAFF"] },
-  { name: "ToDos", href: "/dashboard/todos", icon: CheckSquare, roles: ["ADMIN", "MANAGER", "STAFF"] },
   { name: "Invoices", href: "/dashboard/bills", icon: Receipt, roles: ["ADMIN", "MANAGER", "STAFF", "CLIENT"] },
   { name: "Clients", href: "/dashboard/clients", icon: Users, roles: ["ADMIN", "MANAGER", "STAFF"] },
   { name: "Leads", href: "/dashboard/leads", icon: UserPlus, roles: ["ADMIN", "MANAGER", "STAFF"] },
@@ -54,7 +48,7 @@ export function DashboardNav({ user }: DashboardNavProps) {
         <div className="flex items-center justify-between h-16">
           <div className="flex items-center space-x-8">
             <Link href="/dashboard" className="text-xl font-bold text-primary" aria-label="Go to Dashboard home">
-              Proposal &amp; Billing
+              Billlex Receivables
             </Link>
             <div className="flex space-x-4" role="menubar" aria-label="Navigation menu">
               {Array.isArray(filteredNav) && filteredNav.map((item) => {

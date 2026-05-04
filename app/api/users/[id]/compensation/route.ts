@@ -4,7 +4,8 @@ import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { z } from "zod"
-import { UserRole, CompensationType, PercentageType } from "@prisma/client"
+import { UserRole } from "@prisma/client"
+import { buildNormalizedCompensationCreateData } from "@/lib/compensation-create-data"
 
 const compensationSchema = z.object({
   compensationType: z.enum(["SALARY_BONUS", "PERCENTAGE_BASED"]),
@@ -122,19 +123,9 @@ export async function POST(
       },
     })
 
-    // Create new compensation
+    const createData = buildNormalizedCompensationCreateData(userId, validatedData)
     const compensation = await prisma.userCompensation.create({
-      data: {
-        userId,
-        compensationType: validatedData.compensationType as CompensationType,
-        baseSalary: validatedData.baseSalary ?? null,
-        maxBonusMultiplier: validatedData.maxBonusMultiplier ?? null,
-        percentageType: validatedData.percentageType as PercentageType | null,
-        projectPercentage: validatedData.projectPercentage ?? null,
-        directWorkPercentage: validatedData.directWorkPercentage ?? null,
-        effectiveFrom: validatedData.effectiveFrom,
-        effectiveTo: validatedData.effectiveTo ?? null,
-      },
+      data: createData,
     })
 
     return NextResponse.json({ compensation }, { status: 201 })

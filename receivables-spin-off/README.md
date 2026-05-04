@@ -33,7 +33,18 @@ npx prisma db push
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3001](http://localhost:3001) with your browser to see the result.
+
+### Share local dev (HTTPS tunnel)
+
+Dev server uses **port 3001**. Set `NEXTAUTH_URL` and `NEXT_PUBLIC_APP_URL` to your tunnel origin (no trailing slash). See [docs/TUNNEL_DEV.md](docs/TUNNEL_DEV.md).
+
+```bash
+npm run tunnel:env -- --write-env-tunnel https://your-tunnel-host.example
+npm run dev:tunnel
+```
+
+Or print lines to paste into `.env.local`: `npm run tunnel:env -- https://...`
 
 ## Tech Stack
 

@@ -4,13 +4,11 @@ import { prisma } from "@/lib/prisma"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
-import { Plus, Search } from "lucide-react"
+import { Plus, Search, Upload } from "lucide-react"
 import { Input } from "@/components/ui/input"
-import { formatCurrency, formatDate } from "@/lib/utils"
 import { BillStatus } from "@prisma/client"
 import { InvoiceStatusFilter } from "@/components/invoices/InvoiceStatusFilter"
 import { InvoiceClientFilter } from "@/components/invoices/InvoiceClientFilter"
-import { InvoiceProjectFilter } from "@/components/invoices/InvoiceProjectFilter"
 import { InvoicesList } from "@/components/invoices/InvoicesList"
 
 export const dynamic = 'force-dynamic'
@@ -18,14 +16,13 @@ export const dynamic = 'force-dynamic'
 export default async function BillsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string; clientId?: string; projectId?: string; page?: string; limit?: string }>
+  searchParams: Promise<{ status?: string; clientId?: string; page?: string; limit?: string }>
 }) {
   try {
     const session = await getServerSession(authOptions)
     const params = await searchParams
     const statusParam = params?.status
     const clientIdParam = params?.clientId
-    const projectIdParam = params?.projectId
     const page = parseInt(params?.page || "1")
     const limit = parseInt(params?.limit || "50")
     const skip = (page - 1) * limit
@@ -58,11 +55,6 @@ export default async function BillsPage({
     // Filter by client
     if (clientIdParam) {
       where.clientId = clientIdParam
-    }
-
-    // Filter by project
-    if (projectIdParam) {
-      where.projectId = projectIdParam
     }
 
     // Filter for clients
@@ -136,21 +128,13 @@ export default async function BillsPage({
       prisma.bill.count({ where })
     ])
 
-    // Fetch clients and projects for filter dropdowns (only for non-client users)
+    // Fetch clients for filter dropdowns (only for non-client users)
     const clients = session.user.role !== "CLIENT" 
       ? await prisma.client.findMany({
           where: {
             deletedAt: null, // Exclude deleted clients
           },
           select: { id: true, name: true, company: true },
-          orderBy: { name: "asc" },
-        })
-      : []
-
-    const projects = session.user.role !== "CLIENT"
-      ? await prisma.project.findMany({
-          where: { deletedAt: null },
-          select: { id: true, name: true },
           orderBy: { name: "asc" },
         })
       : []
@@ -184,12 +168,20 @@ export default async function BillsPage({
             <p className="text-gray-600 mt-2">Manage your invoices</p>
           </div>
           {session.user.role !== "CLIENT" && (
-            <Link href="/dashboard/bills/new">
-              <Button>
-                <Plus className="h-4 w-4 mr-2" />
-                New Invoice
-              </Button>
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link href="/dashboard/bills/import">
+                <Button variant="outline">
+                  <Upload className="h-4 w-4 mr-2" />
+                  Import CSV
+                </Button>
+              </Link>
+              <Link href="/dashboard/bills/new">
+                <Button>
+                  <Plus className="h-4 w-4 mr-2" />
+                  New Invoice
+                </Button>
+              </Link>
+            </div>
           )}
         </div>
 
@@ -206,11 +198,8 @@ export default async function BillsPage({
             {session.user.role !== "CLIENT" && clients.length > 0 && (
               <InvoiceClientFilter clients={clients} />
             )}
-            {session.user.role !== "CLIENT" && projects.length > 0 && (
-              <InvoiceProjectFilter projects={projects} />
-            )}
           </div>
-          {(statusParam || clientIdParam || projectIdParam) && (
+          {(statusParam || clientIdParam) && (
             <div className="text-sm text-gray-600">
               Filters:{" "}
               {statusParam && (
@@ -222,17 +211,14 @@ export default async function BillsPage({
                   Client: {clients.find(c => c.id === clientIdParam)?.name || clientIdParam}
                 </span>
               )}
-              {projectIdParam && (
-                <span>
-                  {(statusParam || clientIdParam) && " • "}
-                  Project: {projects.find(p => p.id === projectIdParam)?.name || projectIdParam}
-                </span>
-              )}
             </div>
           )}
         </div>
 
-        <InvoicesList bills={filteredBills} isAdmin={session.user.role === "ADMIN"} />
+        <InvoicesList
+          bills={filteredBills}
+          isAdmin={session.user.role === "ADMIN" || session.user.role === "MANAGER"}
+        />
 
         {filteredBills.length === 0 && (
           <Card>

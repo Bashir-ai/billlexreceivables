@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
+import { Checkbox } from "@/components/ui/checkbox"
 import { useRouter } from "next/navigation"
 import { UserManagement } from "@/components/settings/UserManagement"
 import { JunkBox } from "@/components/settings/JunkBox"
@@ -22,6 +23,15 @@ export default function SettingsPage() {
   const [success, setSuccess] = useState("")
   const [hourlyRate, setHourlyRate] = useState<string>("")
   const [timezone, setTimezone] = useState<string>("UTC")
+  const [syncStartDate, setSyncStartDate] = useState<string>("2026-01-01")
+  const [syncEndDate, setSyncEndDate] = useState<string>(new Date().toISOString().slice(0, 10))
+  const [syncDryRun, setSyncDryRun] = useState<boolean>(true)
+  const [syncLoading, setSyncLoading] = useState(false)
+  const [syncResult, setSyncResult] = useState<any>(null)
+  const [syncError, setSyncError] = useState("")
+  const [avazaTestLoading, setAvazaTestLoading] = useState(false)
+  const [avazaTestResult, setAvazaTestResult] = useState<any>(null)
+  const [avazaTestError, setAvazaTestError] = useState("")
 
   useEffect(() => {
     if (session?.user?.id) {
@@ -108,6 +118,55 @@ export default function SettingsPage() {
       setError("An error occurred. Please try again.")
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleAvazaSync = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSyncError("")
+    setSyncResult(null)
+    setSyncLoading(true)
+    try {
+      const response = await fetch("/api/integrations/avaza-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startDate: syncStartDate || null,
+          endDate: syncEndDate || null,
+          dryRun: syncDryRun,
+        }),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok) {
+        setSyncError(data?.error || data?.message || "Avaza sync failed")
+      } else {
+        setSyncResult(data)
+      }
+    } catch (err: any) {
+      setSyncError(err?.message || "Avaza sync failed")
+    } finally {
+      setSyncLoading(false)
+    }
+  }
+
+  const handleAvazaConnectionTest = async () => {
+    setAvazaTestError("")
+    setAvazaTestResult(null)
+    setAvazaTestLoading(true)
+    try {
+      const response = await fetch("/api/integrations/avaza-sync/test", {
+        method: "POST",
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok) {
+        setAvazaTestError(data?.error || data?.message || "Avaza connection test failed")
+      } else {
+        setAvazaTestResult(data)
+      }
+    } catch (err: any) {
+      setAvazaTestError(err?.message || "Avaza connection test failed")
+    } finally {
+      setAvazaTestLoading(false)
     }
   }
 
@@ -229,6 +288,76 @@ export default function SettingsPage() {
               )}
               <Button type="submit" disabled={saving}>
                 {saving ? "Saving..." : "Save Hourly Rate"}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+
+      {(session.user.role === "ADMIN" || session.user.role === "MANAGER") && (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Avaza Sync</CardTitle>
+            <CardDescription>
+              Manually sync clients and invoices from Avaza for a selected period. Default start is Jan 1, 2026.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleAvazaSync} className="space-y-4">
+              <div className="rounded-md border p-3 space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Verify API credentials before syncing.
+                </p>
+                <div className="flex items-center gap-3">
+                  <Button type="button" variant="outline" onClick={handleAvazaConnectionTest} disabled={avazaTestLoading}>
+                    {avazaTestLoading ? "Testing..." : "Test Avaza Connection"}
+                  </Button>
+                </div>
+                {avazaTestError ? <p className="text-sm text-destructive">{avazaTestError}</p> : null}
+                {avazaTestResult ? (
+                  <pre className="text-xs whitespace-pre-wrap bg-muted p-3 rounded">
+                    {JSON.stringify(avazaTestResult, null, 2)}
+                  </pre>
+                ) : null}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="syncStartDate">Start date</Label>
+                  <Input
+                    id="syncStartDate"
+                    type="date"
+                    value={syncStartDate}
+                    onChange={(e) => setSyncStartDate(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="syncEndDate">End date</Label>
+                  <Input
+                    id="syncEndDate"
+                    type="date"
+                    value={syncEndDate}
+                    onChange={(e) => setSyncEndDate(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="syncDryRun"
+                  checked={syncDryRun}
+                  onCheckedChange={(checked: boolean | string) => setSyncDryRun(Boolean(checked))}
+                />
+                <Label htmlFor="syncDryRun" className="cursor-pointer">
+                  Dry run (preview only, no database changes)
+                </Label>
+              </div>
+              {syncError ? <p className="text-sm text-destructive">{syncError}</p> : null}
+              {syncResult ? (
+                <pre className="text-xs whitespace-pre-wrap bg-muted p-3 rounded">
+                  {JSON.stringify(syncResult, null, 2)}
+                </pre>
+              ) : null}
+              <Button type="submit" disabled={syncLoading}>
+                {syncLoading ? "Running sync..." : "Run Avaza Sync"}
               </Button>
             </form>
           </CardContent>

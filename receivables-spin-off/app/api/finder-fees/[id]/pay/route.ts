@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
+import { UserRole } from "@prisma/client"
 import { z } from "zod"
 
 const paymentSchema = z.object({
@@ -22,10 +23,9 @@ export async function POST(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Only admins can record payments
-    if (session.user.role !== "ADMIN") {
+    if (session.user.role !== UserRole.ADMIN && session.user.role !== UserRole.MANAGER) {
       return NextResponse.json(
-        { error: "Forbidden - Only admins can record payments" },
+        { error: "Forbidden - Only admins and managers can record payments" },
         { status: 403 }
       )
     }
@@ -66,48 +66,70 @@ export async function POST(
       newStatus = "PARTIALLY_PAID"
     }
 
-    // Create payment record
-    const payment = await prisma.finderFeePayment.create({
-      data: {
-        finderFeeId: id,
-        amount: validatedData.amount,
-        paymentDate: validatedData.paymentDate ? new Date(validatedData.paymentDate) : new Date(),
-        notes: validatedData.notes || null,
-        paidBy: session.user.id,
-      },
-    })
+    const paymentDate = validatedData.paymentDate
+      ? new Date(validatedData.paymentDate)
+      : new Date()
 
-    // Update finder fee
-    const updatedFinderFee = await prisma.finderFee.update({
-      where: { id },
-      data: {
-        status: newStatus,
-        paidAmount: newTotalPaid,
-        remainingAmount: Math.max(0, remainingAmount),
-        paidAt: newStatus === "PAID" ? new Date() : finderFee.paidAt,
-      },
-      include: {
-        bill: {
-          select: {
-            id: true,
-            invoiceNumber: true,
-            amount: true,
-            paidAt: true,
+    const updatedFinderFee = await prisma.$transaction(async (tx) => {
+      await tx.finderFeePayment.create({
+        data: {
+          finderFeeId: id,
+          amount: validatedData.amount,
+          paymentDate,
+          notes: validatedData.notes || null,
+          paidBy: session.user.id,
+        },
+      })
+
+      const updated = await tx.finderFee.update({
+        where: { id },
+        data: {
+          status: newStatus,
+          paidAmount: newTotalPaid,
+          remainingAmount: Math.max(0, remainingAmount),
+          paidAt: newStatus === "PAID" ? new Date() : finderFee.paidAt,
+        },
+        include: {
+          bill: {
+            select: {
+              id: true,
+              invoiceNumber: true,
+              amount: true,
+              paidAt: true,
+            },
+          },
+          client: {
+            select: {
+              id: true,
+              name: true,
+              company: true,
+            },
+          },
+          payments: {
+            orderBy: {
+              paymentDate: "desc",
+            },
           },
         },
-        client: {
-          select: {
-            id: true,
-            name: true,
-            company: true,
-          },
+      })
+
+      // Ledger: paying finder fee reduces running balance (same sign as compensation payouts).
+      await tx.userFinancialTransaction.create({
+        data: {
+          userId: finderFee.finderId,
+          type: "PAYMENT",
+          relatedId: id,
+          relatedType: "FINDER_FEE",
+          amount: -validatedData.amount,
+          currency: "EUR",
+          transactionDate: paymentDate,
+          description: `Finder fee payout — invoice ${updated.bill.invoiceNumber || updated.bill.id}`,
+          notes: validatedData.notes || null,
+          createdBy: session.user.id,
         },
-        payments: {
-          orderBy: {
-            paymentDate: "desc",
-          },
-        },
-      },
+      })
+
+      return updated
     })
 
     return NextResponse.json(updatedFinderFee)

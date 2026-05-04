@@ -78,7 +78,12 @@ export async function POST(
     if (!dueDate || dueDate >= today) {
       return NextResponse.json({ error: "Invoice is not outstanding" }, { status: 400 })
     }
-    if ([BillStatus.PAID, BillStatus.CANCELLED, BillStatus.WRITTEN_OFF].includes(bill.status)) {
+    const nonCollectibleStatuses: BillStatus[] = [
+      BillStatus.PAID,
+      BillStatus.CANCELLED,
+      BillStatus.WRITTEN_OFF,
+    ]
+    if (nonCollectibleStatuses.includes(bill.status)) {
       return NextResponse.json({ error: "Invoice is not collectible" }, { status: 400 })
     }
 

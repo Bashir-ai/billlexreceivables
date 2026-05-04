@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { z } from "zod"
 import { isDatabaseConnectionError, getDatabaseErrorMessage } from "@/lib/database-error-handler"
+import { ManagementAttributionRole } from "@prisma/client"
 
 const contactPersonSchema = z.object({
   id: z.string().optional(),
@@ -18,6 +19,13 @@ const contactPersonSchema = z.object({
 const clientFinderSchema = z.object({
   userId: z.string().min(1),
   finderFeePercent: z.number().min(0).max(100).default(0),
+})
+
+const clientManagementSplitSchema = z.object({
+  userId: z.string().min(1),
+  role: z.enum(["CLIENT_MANAGER", "PROJECT_MANAGER"]),
+  splitPercent: z.number().min(0).max(100).default(0),
+  fixedAmount: z.number().min(0).nullable().optional(),
 })
 
 const clientSchema = z.object({
@@ -40,6 +48,7 @@ const clientSchema = z.object({
   referrerName: z.string().optional().nullable(),
   referrerContactInfo: z.string().optional().nullable(),
   finders: z.array(clientFinderSchema).optional(),
+  managementSplits: z.array(clientManagementSplitSchema).optional(),
   contacts: z.array(contactPersonSchema).optional(),
 })
 
@@ -49,6 +58,19 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    let supportsManagementSplits = false
+    try {
+      await prisma.client.findFirst({
+        include: {
+          managementSplits: {
+            take: 1,
+          },
+        },
+      } as any)
+      supportsManagementSplits = true
+    } catch {
+      supportsManagementSplits = false
+    }
     const session = await getServerSession(authOptions)
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -71,6 +93,15 @@ export async function GET(
             user: { select: { id: true, name: true, email: true } },
           },
         },
+        ...(supportsManagementSplits
+          ? {
+              managementSplits: {
+                include: {
+                  user: { select: { id: true, name: true, email: true } },
+                },
+              },
+            }
+          : {}),
         clientManager: { select: { id: true, name: true, email: true } },
         proposals: {
           where: {
@@ -134,6 +165,19 @@ export async function PUT(
 ) {
   try {
     const { id } = await params
+    let supportsManagementSplits = false
+    try {
+      await prisma.client.findFirst({
+        include: {
+          managementSplits: {
+            take: 1,
+          },
+        },
+      } as any)
+      supportsManagementSplits = true
+    } catch {
+      supportsManagementSplits = false
+    }
     const session = await getServerSession(authOptions)
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -148,6 +192,20 @@ export async function PUT(
 
     const body = await request.json()
     const validatedData = clientSchema.parse(body)
+    const managementSplits = validatedData.managementSplits || []
+    const byRole = {
+      CLIENT_MANAGER: managementSplits.filter((s) => s.role === "CLIENT_MANAGER"),
+      PROJECT_MANAGER: managementSplits.filter((s) => s.role === "PROJECT_MANAGER"),
+    }
+    for (const [role, rows] of Object.entries(byRole)) {
+      const total = rows.reduce((sum, row) => sum + row.splitPercent, 0)
+      if (total > 100.0001) {
+        return NextResponse.json(
+          { error: `${role} split percentage cannot exceed 100` },
+          { status: 400 }
+        )
+      }
+    }
 
     // Handle contacts: delete all existing and create new ones
     await prisma.clientContact.deleteMany({
@@ -209,6 +267,11 @@ export async function PUT(
 
       // Update validatedData.finders to only include new finders to create
       validatedData.finders = newFinders
+    }
+    if (validatedData.managementSplits !== undefined && supportsManagementSplits) {
+      await prisma.clientManagementSplit.deleteMany({
+        where: { clientId: id },
+      })
     }
 
     // Build update data object, only including fields that are provided
@@ -295,6 +358,18 @@ export async function PUT(
           }
         : undefined
     }
+    if (validatedData.managementSplits !== undefined && supportsManagementSplits) {
+      updateData.managementSplits = validatedData.managementSplits.length > 0
+        ? {
+            create: validatedData.managementSplits.map((split) => ({
+              userId: split.userId,
+              role: split.role as ManagementAttributionRole,
+              splitPercent: split.splitPercent,
+              fixedAmount: split.fixedAmount ?? null,
+            })),
+          }
+        : undefined
+    }
     if (validatedData.contacts !== undefined) {
       updateData.contacts = validatedData.contacts && validatedData.contacts.length > 0
         ? {
@@ -324,6 +399,15 @@ export async function PUT(
             user: { select: { id: true, name: true, email: true } },
           },
         },
+        ...(supportsManagementSplits
+          ? {
+              managementSplits: {
+                include: {
+                  user: { select: { id: true, name: true, email: true } },
+                },
+              },
+            }
+          : {}),
         clientManager: { select: { id: true, name: true, email: true } },
       },
     })

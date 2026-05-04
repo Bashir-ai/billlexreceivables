@@ -6,6 +6,12 @@ import { prisma } from "@/lib/prisma"
 import { z } from "zod"
 import { UserRole, AdvanceType, AdvanceFrequency } from "@prisma/client"
 
+function advanceStepMonths(frequency: AdvanceFrequency | null | undefined): number {
+  if (frequency === "QUARTERLY") return 3
+  if (frequency === "YEARLY") return 12
+  return 1
+}
+
 const updateAdvanceSchema = z.object({
   description: z.string().min(1).optional(),
   amount: z.number().positive().optional(),
@@ -62,6 +68,75 @@ export async function PUT(
       },
     })
 
+    // Keep historical advance ledger rows aligned with the latest advance definition.
+    await prisma.userFinancialTransaction.updateMany({
+      where: {
+        userId,
+        relatedId: advance.id,
+        relatedType: "ADVANCE",
+      },
+      data: {
+        amount: -advance.amount,
+        currency: advance.currency,
+        description: advance.description,
+      },
+    })
+
+    // If recurring and active, backfill any missing historical occurrences after edits.
+    if (
+      advance.type === "RECURRING" &&
+      advance.isActive &&
+      advance.frequency
+    ) {
+      const stopAt = advance.endDate && advance.endDate < new Date() ? advance.endDate : new Date()
+      const step = advanceStepMonths(advance.frequency)
+      const existingTx = await prisma.userFinancialTransaction.findMany({
+        where: {
+          userId,
+          relatedId: advance.id,
+          relatedType: "ADVANCE",
+        },
+        select: { transactionDate: true },
+      })
+      const existingDateKeys = new Set(
+        existingTx.map((tx) => tx.transactionDate.toISOString().slice(0, 10))
+      )
+      const cursor = new Date(advance.startDate)
+      const missingRows: Array<{
+        userId: string
+        type: "ADVANCE"
+        relatedId: string
+        relatedType: "ADVANCE"
+        amount: number
+        currency: string
+        transactionDate: Date
+        description: string
+        notes: string
+        createdBy: string
+      }> = []
+      while (cursor <= stopAt) {
+        const key = cursor.toISOString().slice(0, 10)
+        if (!existingDateKeys.has(key)) {
+          missingRows.push({
+            userId,
+            type: "ADVANCE",
+            relatedId: advance.id,
+            relatedType: "ADVANCE",
+            amount: -advance.amount,
+            currency: advance.currency,
+            transactionDate: new Date(cursor),
+            description: advance.description,
+            notes: `Recurring advance backfill - ${advance.frequency}`,
+            createdBy: session.user.id,
+          })
+        }
+        cursor.setMonth(cursor.getMonth() + step)
+      }
+      if (missingRows.length > 0) {
+        await prisma.userFinancialTransaction.createMany({ data: missingRows })
+      }
+    }
+
     return NextResponse.json({ advance })
   } catch (error: any) {
     console.error("Error updating advance:", error)
@@ -85,9 +160,9 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Only admins and managers can delete advances
-    if (session.user.role !== UserRole.ADMIN && session.user.role !== UserRole.MANAGER) {
-      return NextResponse.json({ error: "Forbidden - Admin or Manager access required" }, { status: 403 })
+    // Only admins can permanently delete advances
+    if (session.user.role !== UserRole.ADMIN) {
+      return NextResponse.json({ error: "Forbidden - Admin access required" }, { status: 403 })
     }
 
     const { id, advanceId } = await params
@@ -105,13 +180,21 @@ export async function DELETE(
       return NextResponse.json({ error: "Advance not found" }, { status: 404 })
     }
 
-    // Deactivate instead of delete (soft delete)
-    const advance = await prisma.officeAdvance.update({
-      where: { id: advanceId },
-      data: { isActive: false },
+    await prisma.$transaction(async (tx) => {
+      await tx.userFinancialTransaction.deleteMany({
+        where: {
+          userId,
+          relatedId: advanceId,
+          relatedType: "ADVANCE",
+        },
+      })
+
+      await tx.officeAdvance.delete({
+        where: { id: advanceId },
+      })
     })
 
-    return NextResponse.json({ advance })
+    return NextResponse.json({ success: true })
   } catch (error: any) {
     console.error("Error deleting advance:", error)
     return NextResponse.json(

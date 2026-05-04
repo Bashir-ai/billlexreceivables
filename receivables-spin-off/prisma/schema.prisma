@@ -58,6 +58,17 @@ enum BillStatus {
   WRITTEN_OFF
 }
 
+enum InvoiceImportStatus {
+  STAGED
+  CONFIRMED
+}
+
+enum InvoiceImportRowStatus {
+  VALID
+  INVALID
+  IMPORTED
+}
+
 enum ApprovalStatus {
   PENDING
   APPROVED
@@ -174,6 +185,7 @@ enum InteractionType {
 enum CompensationType {
   SALARY_BONUS
   PERCENTAGE_BASED
+  SALARY_BONUS_FINDER_MANAGEMENT
 }
 
 enum PercentageType {
@@ -265,6 +277,8 @@ model User {
   managedClients          Client[]            @relation("ClientManager")
   finderFees              FinderFee[]         @relation("FinderFeeRecipient")
   finderFeePayments       FinderFeePayment[]  @relation("FinderFeePaymentBy")
+  managementFees          ManagementFee[]     @relation("ManagementFeeRecipient")
+  managementFeePayments ManagementFeePayment[] @relation("ManagementFeePaymentBy")
   createdLeads            Lead[]              @relation("LeadCreator")
   managedLeads            Lead[]              @relation("LeadManager")
   leadInteractions        LeadInteraction[]  @relation("LeadInteractionCreator")
@@ -292,6 +306,8 @@ model User {
   createdExpenses         ProjectExpense[]          @relation("ExpenseCreator")
   deletionRequestsMade   UserDeletionRequest[]     @relation("DeletionRequester")
   deletionTargets         UserDeletionRequest[]    @relation("DeletionTarget")
+  clientManagementSplits ClientManagementSplit[]   @relation("ClientManagementSplitUser")
+  billAttributionRows    BillAttributionParticipant[]
 }
 
 model Client {
@@ -323,6 +339,8 @@ model Client {
   // Referrer fields - person/entity who recommended this client
   referrerName           String? // Name of person/entity who recommended the client
   referrerContactInfo    String? // Contact info for the referrer
+  avazaExternalId        String?  @unique
+  avazaUpdatedAt         DateTime?
   deletedAt              DateTime? // Soft delete
   archivedAt              DateTime? // Archive (different from delete - can be unarchived)
   createdAt              DateTime @default(now())
@@ -335,6 +353,7 @@ model Client {
   @@index([deletedAt, archivedAt])
   @@index([createdAt])
   @@index([clientCode])
+  @@index([avazaExternalId])
 
   // Relations
   creator       User            @relation("ClientCreator", fields: [createdBy], references: [id])
@@ -344,10 +363,13 @@ model Client {
   bills         Bill[]
   projects      Project[]
   contacts      ClientContact[] // One or more contact persons
-  finderFees    FinderFee[] // Finder fees earned for this client
+  finderFees       FinderFee[] // Finder fees earned for this client
+  managementFees   ManagementFee[]
   todos         Todo[] // Todos associated with this client
   convertedFrom Lead?        @relation("ConvertedLead")
   compensationEligibility CompensationEligibility[] @relation("EligibilityClient")
+  managementSplits ClientManagementSplit[]
+  billAttributionSnapshots BillAttributionSnapshot[] @relation("BillAttributionSnapshotClient")
 }
 
 model ClientContact {
@@ -379,6 +401,29 @@ model ClientFinder {
   finderFees FinderFee[] // Finder fees generated for this finder-client relationship
 
   @@unique([clientId, userId])
+}
+
+enum ManagementAttributionRole {
+  CLIENT_MANAGER
+  PROJECT_MANAGER
+}
+
+model ClientManagementSplit {
+  id          String                  @id @default(cuid())
+  clientId    String
+  userId      String
+  role        ManagementAttributionRole
+  splitPercent Float                  @default(0)
+  fixedAmount Float?
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  client      Client                  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user        User                    @relation("ClientManagementSplitUser", fields: [userId], references: [id])
+
+  @@unique([clientId, userId, role])
+  @@index([clientId, role])
+  @@index([userId, role])
 }
 
 model Proposal {
@@ -595,6 +640,8 @@ model Bill {
   writtenOffAt              DateTime? // When invoice was written off
   writtenOffBy              String?    // User who wrote it off
   originalAmount            Float?     // Original amount before write-off (for reporting)
+  avazaExternalId           String?    @unique
+  avazaUpdatedAt            DateTime?
   deletedAt                 DateTime?
 
   @@index([clientId])
@@ -610,6 +657,7 @@ model Bill {
   @@index([clientId, deletedAt])
   @@index([status, internalApprovalRequired, internalApprovalsComplete])
   @@index([createdAt])
+  @@index([avazaExternalId])
 
   // Relations
   proposal       Proposal?       @relation(fields: [proposalId], references: [id])
@@ -624,10 +672,64 @@ model Bill {
   interactions   InvoiceInteraction[]
   items          BillItem[]
   todos          Todo[]
-  finderFees     FinderFee[] // Finder fees generated when invoice is paid
+  finderFees       FinderFee[] // Finder fees generated when invoice is paid
+  managementFees   ManagementFee[]
   installmentInvoices InstallmentInvoice[]
   expenses       ProjectExpense[] // Expenses billed on this invoice
   compensationEligibility CompensationEligibility[] @relation("EligibilityBill")
+  attributionSnapshots BillAttributionSnapshot[]
+}
+
+enum BillAttributionRole {
+  FINDER
+  CLIENT_MANAGER
+  PROJECT_MANAGER
+}
+
+/// Role for management-fee ledger lines (mirrors management attribution roles).
+enum ManagementFeeRole {
+  CLIENT_MANAGER
+  PROJECT_MANAGER
+}
+
+model BillAttributionSnapshot {
+  id             String                       @id @default(cuid())
+  billId         String
+  version        Int                          @default(1)
+  sourceClientId String?
+  sourceProjectId String?
+  isBackfilled   Boolean                      @default(false)
+  lockedAt       DateTime                     @default(now())
+  createdAt      DateTime                     @default(now())
+  updatedAt      DateTime                     @updatedAt
+
+  bill           Bill                         @relation(fields: [billId], references: [id], onDelete: Cascade)
+  sourceClient   Client?                      @relation("BillAttributionSnapshotClient", fields: [sourceClientId], references: [id], onDelete: SetNull)
+  sourceProject  Project?                     @relation("BillAttributionSnapshotProject", fields: [sourceProjectId], references: [id], onDelete: SetNull)
+  rows           BillAttributionParticipant[]
+
+  @@unique([billId, version])
+  @@index([billId, lockedAt])
+}
+
+model BillAttributionParticipant {
+  id                       String               @id @default(cuid())
+  snapshotId               String
+  userId                   String
+  role                     BillAttributionRole
+  splitPercent             Float                @default(0)
+  fixedAmount              Float?
+  sourceClientFinderId     String?
+  sourceManagementSplitId  String?
+  sourceProjectManagerId   String?
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+
+  snapshot                 BillAttributionSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  user                     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([snapshotId, role])
+  @@index([userId, role])
 }
 
 model BillItem {
@@ -655,6 +757,51 @@ model BillItem {
   // Relations
   bill   Bill  @relation(fields: [billId], references: [id], onDelete: Cascade)
   person User? @relation("BillItemPerson", fields: [personId], references: [id])
+}
+
+model InvoiceImportBatch {
+  id           String              @id @default(cuid())
+  fileName     String
+  createdBy    String
+  status       InvoiceImportStatus @default(STAGED)
+  totalRows    Int                 @default(0)
+  validRows    Int                 @default(0)
+  invalidRows  Int                 @default(0)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  rows InvoiceImportRow[]
+}
+
+model InvoiceImportRow {
+  id                String               @id @default(cuid())
+  batchId           String
+  rowIndex          Int
+  status            InvoiceImportRowStatus @default(VALID)
+  errorMessage      String?
+  rawData           Json?
+  clientName        String?
+  clientEmail       String?
+  clientCompany     String?
+  leadName          String?
+  leadCompany       String?
+  description       String?
+  invoiceNumber     String?
+  subtotal          Float?
+  totalAmount       Float?
+  taxRate           Float?
+  discountPercent   Float?
+  dueDate           DateTime?
+  sectorName        String?
+  areaOfLawName     String?
+  createdBillId     String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  batch InvoiceImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([batchId])
+  @@index([status])
 }
 
 model Milestone {
@@ -727,6 +874,7 @@ model Project {
   compensationEligibility CompensationEligibility[] @relation("EligibilityProject")
   interactions     ProjectInteraction[]
   userRates        ProjectUserRate[]
+  billAttributionSnapshots BillAttributionSnapshot[] @relation("BillAttributionSnapshotProject")
 }
 
 model PaymentTerm {
@@ -1042,6 +1190,52 @@ model FinderFeePayment {
   paidByUser User      @relation("FinderFeePaymentBy", fields: [paidBy], references: [id])
 }
 
+model ManagementFee {
+  id                         String            @id @default(cuid())
+  billId                     String
+  clientId                   String
+  recipientUserId            String
+  role                       ManagementFeeRole
+
+  invoiceNetAmount Float
+  /// Dollar share of the 10% management pool from locked attribution (split % of pool + row fixed).
+  attributionBaseAmount Float
+  /// Always 10 here: pool is 10% of invoice net; split % on the bill is share of that pool.
+  compensationPercentApplied Float @default(0)
+  feeAmount                  Float
+  status                     FinderFeeStatus   @default(PENDING)
+  paidAmount                 Float             @default(0)
+  remainingAmount            Float
+  earnedAt                   DateTime
+  paidAt                     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bill      Bill                    @relation(fields: [billId], references: [id], onDelete: Cascade)
+  client    Client                  @relation(fields: [clientId], references: [id])
+  recipient User                    @relation("ManagementFeeRecipient", fields: [recipientUserId], references: [id])
+  payments  ManagementFeePayment[]
+
+  @@unique([billId, recipientUserId, role])
+  @@index([recipientUserId])
+  @@index([clientId])
+  @@index([earnedAt])
+}
+
+model ManagementFeePayment {
+  id                String   @id @default(cuid())
+  managementFeeId String
+  amount            Float
+  paymentDate       DateTime @default(now())
+  notes             String?
+  paidBy            String
+  createdAt         DateTime @default(now())
+
+  managementFee ManagementFee @relation(fields: [managementFeeId], references: [id], onDelete: Cascade)
+  paidByUser    User          @relation("ManagementFeePaymentBy", fields: [paidBy], references: [id])
+}
+
 model Lead {
   id                     String   @id @default(cuid())
   name                   String
@@ -1268,6 +1462,17 @@ model UserCompensation {
   percentageType      PercentageType? // For percentage-based compensation
   projectPercentage   Float? // Percentage of project total (0-100)
   directWorkPercentage Float? // Percentage of direct work fees/hours (0-100)
+  projectFixedAmount   Float? // Optional fixed component applied monthly for project-total scheme
+  directWorkFixedAmount Float? // Optional fixed component applied monthly for direct-work scheme
+  bonusFixedAmount     Float? // Optional fixed bonus component
+  bonusPercent         Float? // Optional percentage bonus component
+  finderFeePercent     Float? // Optional finder-fee payout component (percentage)
+  finderFeeFixedAmount Float? // Optional finder-fee payout component (fixed)
+  managementFeePercent Float? // Optional management-fee payout component (percentage)
+  managementFeeFixedAmount Float? // Optional management-fee payout component (fixed)
+  employmentStartDate  DateTime? // Optional employment/start date used for pro-rata calculations
+  bonusDueFrequency    AdvanceFrequency? // Bonus cadence (monthly/quarterly/yearly)
+  bonusDueMonth        Int? // Month (1-12) when annual/quarterly bonus anchor is due
   effectiveFrom       DateTime
   effectiveTo         DateTime? // Null means currently active
   createdAt           DateTime @default(now())
@@ -1514,4 +1719,35 @@ model UserDeletionRequest {
   
   @@index([status])
   @@index([targetUserId])
+}
+
+model IntegrationSyncState {
+  id           String   @id @default(cuid())
+  provider     String
+  scope        String
+  cursor       String?
+  lastSyncedAt DateTime?
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  @@unique([provider, scope])
+  @@index([provider, scope])
+}
+
+model IntegrationSyncRun {
+  id           String   @id @default(cuid())
+  provider     String
+  scope        String
+  startedAt    DateTime @default(now())
+  finishedAt   DateTime?
+  success      Boolean  @default(false)
+  dryRun       Boolean  @default(false)
+  fetchedCount Int      @default(0)
+  createdCount Int      @default(0)
+  updatedCount Int      @default(0)
+  failedCount  Int      @default(0)
+  errorSummary String?
+  detailsJson  String?
+
+  @@index([provider, scope, startedAt])
 }

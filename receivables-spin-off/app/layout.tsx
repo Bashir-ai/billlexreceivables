@@ -5,8 +5,8 @@ import "./globals.css"
 import { Providers } from "./providers"
 
 export const metadata: Metadata = {
-  title: "Proposal & Billing App",
-  description: "Manage proposals and billing for your clients",
+  title: "Billlex Receivables",
+  description: "CRM and receivables management for clients and invoices",
 }
 
 export default function RootLayout({

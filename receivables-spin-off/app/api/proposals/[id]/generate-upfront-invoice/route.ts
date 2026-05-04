@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { UpfrontPaymentType } from "@prisma/client"
+import { createBillAttributionSnapshot } from "@/lib/bill-attribution"
 
 export async function POST(
   request: Request,
@@ -246,6 +247,12 @@ export async function POST(
           },
         },
       },
+    })
+    await createBillAttributionSnapshot({
+      tx: prisma,
+      billId: invoice.id,
+      clientId: invoice.clientId,
+      projectId: invoice.projectId,
     })
 
     return NextResponse.json({

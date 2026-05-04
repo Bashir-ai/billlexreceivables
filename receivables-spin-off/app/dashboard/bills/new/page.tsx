@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -9,20 +9,77 @@ import { Select } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { formatCurrency, formatDate } from "@/lib/utils"
+import { formatCurrency } from "@/lib/utils"
+
+function toArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[]
+  if (value && typeof value === "object" && Array.isArray((value as { data?: unknown }).data)) {
+    return (value as { data: T[] }).data
+  }
+  return []
+}
+
+type AttributionRole = "FINDER" | "CLIENT_MANAGER" | "PROJECT_MANAGER"
+
+type LocalAttributionRow = {
+  userId: string
+  role: AttributionRole
+  splitPercent: number
+  fixedAmount: number | null
+}
+
+function buildDefaultAttributionFromClient(client: Record<string, unknown>): LocalAttributionRow[] {
+  const rows: LocalAttributionRow[] = []
+  const finders = (client.finders as unknown[]) || []
+  for (const raw of finders) {
+    const f = raw as Record<string, unknown>
+    const uid = (f.userId as string) || ((f.user as Record<string, unknown>)?.id as string)
+    if (!uid) continue
+    rows.push({
+      userId: uid,
+      role: "FINDER",
+      splitPercent: (f.finderFeePercent as number) || 0,
+      fixedAmount: null,
+    })
+  }
+
+  const splits = (client.managementSplits as unknown[]) || []
+  const hasClientManagerSplit = splits.some(
+    (s) => ((s as Record<string, unknown>).role as string) === "CLIENT_MANAGER"
+  )
+  for (const raw of splits) {
+    const s = raw as Record<string, unknown>
+    const uid = (s.userId as string) || ((s.user as Record<string, unknown>)?.id as string)
+    if (!uid) continue
+    const role = s.role === "PROJECT_MANAGER" ? "PROJECT_MANAGER" : "CLIENT_MANAGER"
+    rows.push({
+      userId: uid,
+      role,
+      splitPercent: (s.splitPercent as number) || 0,
+      fixedAmount: (s.fixedAmount as number | null | undefined) ?? null,
+    })
+  }
+
+  const cmId = client.clientManagerId as string | null | undefined
+  if (!hasClientManagerSplit && cmId) {
+    rows.push({
+      userId: cmId,
+      role: "CLIENT_MANAGER",
+      splitPercent: 100,
+      fixedAmount: null,
+    })
+  }
+
+  return rows
+}
 
 export default function NewBillPage() {
   const router = useRouter()
-  const searchParams = useSearchParams()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const [clients, setClients] = useState<Array<{ id: string; name: string; company?: string | null }>>([])
   const [leads, setLeads] = useState<Array<{ id: string; name: string; company?: string | null }>>([])
-  const [proposals, setProposals] = useState<Array<{ id: string; title: string }>>([])
-  const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([])
   const [formData, setFormData] = useState({
-    proposalId: "",
-    projectId: "",
     clientId: "",
     leadId: "",
     subtotal: "",
@@ -36,211 +93,79 @@ export default function NewBillPage() {
   })
   const [calculatedAmount, setCalculatedAmount] = useState(0)
   const [paymentDetails, setPaymentDetails] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([])
-  const [unbilledItems, setUnbilledItems] = useState<{
-    timesheetEntries: Array<{ id: string; date: string; hours: number; rate: number | null; amount: number; description: string | null; user: { id: string; name: string; email: string } }>
-    charges: Array<{ id: string; description: string; amount: number; quantity: number | null; project?: { id: string; name: string } }>
-    totals: { timesheets: number; charges: number; total: number }
-  } | null>(null)
-  const [selectedTimesheetIds, setSelectedTimesheetIds] = useState<string[]>([])
-  const [selectedChargeIds, setSelectedChargeIds] = useState<string[]>([])
-  const [loadingUnbilled, setLoadingUnbilled] = useState(false)
-
-  // Initialize from URL params
-  useEffect(() => {
-    const leadIdParam = searchParams.get("leadId")
-    const timesheetEntryIdsParam = searchParams.get("timesheetEntryIds")
-    
-    if (leadIdParam) {
-      setFormData(prev => ({ ...prev, leadId: leadIdParam }))
-      if (timesheetEntryIdsParam) {
-        setSelectedTimesheetIds(timesheetEntryIdsParam.split(",").filter(Boolean))
-      }
-    }
-  }, [searchParams])
+  const [staffUsers, setStaffUsers] = useState<Array<{ id: string; name: string; email: string }>>([])
+  const [useClientAttributionDefaults, setUseClientAttributionDefaults] = useState(true)
+  const [defaultAttributionRows, setDefaultAttributionRows] = useState<LocalAttributionRow[]>([])
+  const [attributionRows, setAttributionRows] = useState<LocalAttributionRow[]>([])
 
   useEffect(() => {
     fetch("/api/clients")
       .then((res) => res.json())
       .then((result) => {
-        // Handle paginated response format
-        const data = result.data || result
-        setClients(data)
+        setClients(toArray<{ id: string; name: string; company?: string | null }>(result))
       })
       .catch(console.error)
     
     fetch("/api/leads")
       .then((res) => res.json())
-      .then((data) => setLeads(data.filter((l: any) => !l.deletedAt && !l.archivedAt)))
+      .then((result) => {
+        const rows = toArray<any>(result)
+        setLeads(rows.filter((l) => !l.deletedAt && !l.archivedAt))
+      })
       .catch(console.error)
     
     fetch("/api/payment-details")
       .then((res) => res.json())
-      .then((data) => {
+      .then((result) => {
+        const data = toArray<{ id: string; name: string; isDefault: boolean }>(result)
         setPaymentDetails(data)
         // Set default payment details if available
-        const defaultPd = data.find((pd: any) => pd.isDefault)
+        const defaultPd = data.find((pd) => pd.isDefault)
         if (defaultPd) {
           setFormData(prev => ({ ...prev, paymentDetailsId: defaultPd.id }))
         }
       })
       .catch(console.error)
+
+    fetch("/api/users")
+      .then((res) => res.json())
+      .then((data: Array<{ id: string; name: string; email: string; role: string }>) => {
+        setStaffUsers((Array.isArray(data) ? data : []).filter((u) => u.role !== "CLIENT"))
+      })
+      .catch(console.error)
   }, [])
 
   useEffect(() => {
-    if (formData.clientId) {
-      Promise.all([
-        fetch(`/api/proposals?clientId=${formData.clientId}`).then(res => res.json()).catch(() => ({ data: [] })),
-        fetch(`/api/projects?clientId=${formData.clientId}`).then(res => res.json()).catch(() => []),
-      ])
-        .then(([proposalsResult, projectsResult]) => {
-          // Handle paginated response format
-          const proposalsData = proposalsResult.data || proposalsResult
-          const approvedProposals = proposalsData.filter((p: any) => p.status === "APPROVED")
-          setProposals(approvedProposals)
-          // Handle paginated response format for projects
-          const projectsData = projectsResult.data || projectsResult
-          setProjects(projectsData.filter((p: any) => !p.deletedAt))
-        })
-        .catch(console.error)
-    } else {
-      setProposals([])
-      setProjects([])
-      setUnbilledItems(null)
-      setSelectedTimesheetIds([])
-      setSelectedChargeIds([])
-      setFormData((prev) => ({ ...prev, proposalId: "", projectId: "" }))
+    if (!formData.clientId) {
+      setDefaultAttributionRows([])
+      setAttributionRows([])
+      return
+    }
+
+    let cancelled = false
+    fetch(`/api/clients/${formData.clientId}`)
+      .then((res) => res.json())
+      .then((client) => {
+        if (cancelled || !client?.id) return
+        const built = buildDefaultAttributionFromClient(client as Record<string, unknown>)
+        setDefaultAttributionRows(built)
+      })
+      .catch(console.error)
+
+    return () => {
+      cancelled = true
     }
   }, [formData.clientId])
 
-  // Fetch unbilled items when lead is selected
   useEffect(() => {
-    if (formData.leadId) {
-      setLoadingUnbilled(true)
-      fetch(`/api/leads/${formData.leadId}/timesheet?archived=false`)
-        .then(res => res.json())
-        .then(data => {
-          const unbilled = data.filter((e: any) => e.billable && !e.billed)
-          const timesheetEntries = unbilled.map((e: any) => ({
-            id: e.id,
-            date: e.date,
-            hours: e.hours,
-            rate: e.rate,
-            amount: (e.rate || 0) * e.hours,
-            description: e.description,
-            user: e.user,
-          }))
-          setUnbilledItems({
-            timesheetEntries,
-            charges: [],
-            totals: {
-              timesheets: timesheetEntries.reduce((sum: number, e: any) => sum + e.amount, 0),
-              charges: 0,
-              total: timesheetEntries.reduce((sum: number, e: any) => sum + e.amount, 0),
-            },
-          })
-          // Auto-select all unbilled entries if coming from GenerateInvoiceButton
-          if (searchParams.get("timesheetEntryIds")) {
-            const ids = searchParams.get("timesheetEntryIds")?.split(",").filter(Boolean) || []
-            setSelectedTimesheetIds(ids)
-          } else {
-            setSelectedTimesheetIds(timesheetEntries.map((e: any) => e.id))
-          }
-          setSelectedChargeIds([])
-        })
-        .catch(err => {
-          console.error("Error fetching lead timesheet entries:", err)
-          setUnbilledItems(null)
-        })
-        .finally(() => setLoadingUnbilled(false))
+    if (useClientAttributionDefaults) {
+      setAttributionRows(defaultAttributionRows.map((r) => ({ ...r })))
     }
-  }, [formData.leadId, searchParams])
+  }, [useClientAttributionDefaults, defaultAttributionRows])
 
-  // Fetch unbilled items when project is selected
+  // Calculate totals when tax/discount changes
   useEffect(() => {
-    if (formData.projectId) {
-      setLoadingUnbilled(true)
-      fetch(`/api/projects/${formData.projectId}/unbilled-items`)
-        .then(res => res.json())
-        .then(data => {
-          setUnbilledItems(data)
-          setSelectedTimesheetIds([])
-          setSelectedChargeIds([])
-        })
-        .catch(err => {
-          console.error("Error fetching unbilled items:", err)
-          setUnbilledItems(null)
-        })
-        .finally(() => setLoadingUnbilled(false))
-    } else if (formData.clientId && !formData.projectId && !formData.leadId) {
-      // Fetch unbilled items for all client projects
-      setLoadingUnbilled(true)
-      fetch(`/api/clients/${formData.clientId}/unbilled-items`)
-        .then(res => res.json())
-        .then(data => {
-          setUnbilledItems(data)
-          setSelectedTimesheetIds([])
-          setSelectedChargeIds([])
-        })
-        .catch(err => {
-          console.error("Error fetching unbilled items:", err)
-          setUnbilledItems(null)
-        })
-        .finally(() => setLoadingUnbilled(false))
-    } else {
-      setUnbilledItems(null)
-      setSelectedTimesheetIds([])
-      setSelectedChargeIds([])
-    }
-  }, [formData.projectId, formData.clientId])
-
-  useEffect(() => {
-    if (formData.proposalId && proposals.length > 0) {
-      const proposal = proposals.find((p) => p.id === formData.proposalId)
-      if (proposal) {
-        fetch(`/api/proposals/${formData.proposalId}`)
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.amount) {
-              setFormData((prev) => ({ ...prev, subtotal: data.amount.toString() }))
-            }
-          })
-          .catch(console.error)
-      }
-    }
-  }, [formData.proposalId, proposals])
-
-  // Calculate totals when tax/discount changes or selected items change
-  useEffect(() => {
-    // Calculate subtotal from selected items if any are selected, otherwise use manual subtotal
     let subtotal = parseFloat(formData.subtotal) || 0
-    
-    if (unbilledItems && (selectedTimesheetIds.length > 0 || selectedChargeIds.length > 0)) {
-      let itemsSubtotal = 0
-      
-      // Add selected timesheet amounts
-      selectedTimesheetIds.forEach(id => {
-        const entry = unbilledItems.timesheetEntries.find(e => e.id === id)
-        if (entry) {
-          itemsSubtotal += entry.amount
-        }
-      })
-      
-      // Add selected charge amounts
-      selectedChargeIds.forEach(id => {
-        const charge = unbilledItems.charges.find(c => c.id === id)
-        if (charge) {
-          itemsSubtotal += charge.amount
-        }
-      })
-      
-      // Use items subtotal if items are selected
-      if (itemsSubtotal > 0) {
-        subtotal = itemsSubtotal
-        // Update formData subtotal when items are selected
-        setFormData(prev => ({ ...prev, subtotal: itemsSubtotal.toFixed(2) }))
-      }
-    }
-    
     const taxRate = parseFloat(formData.taxRate) || 0
     const discountPercent = parseFloat(formData.discountPercent) || 0
     const discountAmount = parseFloat(formData.discountAmount) || 0
@@ -269,7 +194,7 @@ export default function NewBillPage() {
     }
 
     setCalculatedAmount(finalAmount)
-  }, [formData.subtotal, formData.taxRate, formData.taxInclusive, formData.discountPercent, formData.discountAmount, selectedTimesheetIds, selectedChargeIds, unbilledItems])
+  }, [formData.subtotal, formData.taxRate, formData.taxInclusive, formData.discountPercent, formData.discountAmount])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -281,28 +206,46 @@ export default function NewBillPage() {
       return
     }
     
+    if (
+      formData.clientId &&
+      !useClientAttributionDefaults &&
+      !attributionRows.some((r) => r.userId.trim() !== "")
+    ) {
+      setError("Add at least one attribution row with a user, or choose client defaults.")
+      return
+    }
+
     setLoading(true)
 
     try {
+      const payload: Record<string, unknown> = {
+        clientId: formData.clientId || undefined,
+        leadId: formData.leadId || undefined,
+        subtotal: formData.subtotal ? parseFloat(formData.subtotal) : undefined,
+        description: formData.description || undefined,
+        paymentDetailsId: formData.paymentDetailsId || undefined,
+        taxInclusive: formData.taxInclusive,
+        taxRate: formData.taxRate ? parseFloat(formData.taxRate) : null,
+        discountPercent: formData.discountPercent ? parseFloat(formData.discountPercent) : null,
+        discountAmount: formData.discountAmount ? parseFloat(formData.discountAmount) : null,
+        dueDate: formData.dueDate || undefined,
+      }
+
+      if (formData.clientId && !useClientAttributionDefaults) {
+        payload.attributionRows = attributionRows
+          .filter((r) => r.userId.trim() !== "")
+          .map((r) => ({
+            userId: r.userId,
+            role: r.role,
+            splitPercent: r.splitPercent || 0,
+            fixedAmount: r.fixedAmount ?? null,
+          }))
+      }
+
       const response = await fetch("/api/bills", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          proposalId: formData.proposalId || undefined,
-          projectId: formData.projectId || undefined,
-          clientId: formData.clientId || undefined,
-          leadId: formData.leadId || undefined,
-          subtotal: formData.subtotal ? parseFloat(formData.subtotal) : undefined,
-          description: formData.description || undefined,
-          paymentDetailsId: formData.paymentDetailsId || undefined,
-          taxInclusive: formData.taxInclusive,
-          taxRate: formData.taxRate ? parseFloat(formData.taxRate) : null,
-          discountPercent: formData.discountPercent ? parseFloat(formData.discountPercent) : null,
-          discountAmount: formData.discountAmount ? parseFloat(formData.discountAmount) : null,
-          dueDate: formData.dueDate || undefined,
-          timesheetEntryIds: selectedTimesheetIds.length > 0 ? selectedTimesheetIds : undefined,
-          chargeIds: selectedChargeIds.length > 0 ? selectedChargeIds : undefined,
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (!response.ok) {
@@ -319,8 +262,27 @@ export default function NewBillPage() {
     }
   }
 
+  const updateAttrRow = (index: number, patch: Partial<LocalAttributionRow>) => {
+    setAttributionRows((prev) => {
+      const next = [...prev]
+      next[index] = { ...next[index], ...patch }
+      return next
+    })
+  }
+
+  const addAttrRow = () => {
+    setAttributionRows((prev) => [
+      ...prev,
+      { userId: "", role: "FINDER", splitPercent: 0, fixedAmount: null },
+    ])
+  }
+
+  const removeAttrRow = (index: number) => {
+    setAttributionRows((prev) => prev.filter((_, i) => i !== index))
+  }
+
   return (
-    <div className="max-w-2xl mx-auto">
+    <div className="max-w-3xl mx-auto">
       <h1 className="text-3xl font-bold mb-8">Create New Invoice</h1>
       <Card>
         <CardHeader>
@@ -335,7 +297,10 @@ export default function NewBillPage() {
                 <Select
                   id="clientId"
                   value={formData.clientId}
-                  onChange={(e) => setFormData({ ...formData, clientId: e.target.value, leadId: "", proposalId: "", projectId: "" })}
+                  onChange={(e) => {
+                    setUseClientAttributionDefaults(true)
+                    setFormData({ ...formData, clientId: e.target.value, leadId: "" })
+                  }}
                 >
                   <option value="">Select a client</option>
                   {clients.map((client) => (
@@ -351,7 +316,7 @@ export default function NewBillPage() {
                 <Select
                   id="leadId"
                   value={formData.leadId}
-                  onChange={(e) => setFormData({ ...formData, leadId: e.target.value, clientId: "", proposalId: "", projectId: "" })}
+                  onChange={(e) => setFormData({ ...formData, leadId: e.target.value, clientId: "" })}
                 >
                   <option value="">Select a lead</option>
                   {leads.map((lead) => (
@@ -366,40 +331,112 @@ export default function NewBillPage() {
               <p className="text-sm text-red-600">Please select either a client or a lead</p>
             )}
 
-            {formData.clientId && proposals.length > 0 && (
-              <div className="space-y-2">
-                <Label htmlFor="proposalId">From Proposal (Optional)</Label>
-                <Select
-                  id="proposalId"
-                  value={formData.proposalId}
-                  onChange={(e) => setFormData({ ...formData, proposalId: e.target.value })}
-                >
-                  <option value="">No proposal</option>
-                  {proposals.map((proposal) => (
-                    <option key={proposal.id} value={proposal.id}>
-                      {proposal.title}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-            )}
+            {formData.clientId && (
+              <Card className="border-muted">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Invoice attribution</CardTitle>
+                  <CardDescription>
+                    Finder and management splits lock on this invoice. Defaults match the client record (including
+                    general client manager when no manager split is set).
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex flex-col gap-2">
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input
+                        type="radio"
+                        name="attrMode"
+                        checked={useClientAttributionDefaults}
+                        onChange={() => setUseClientAttributionDefaults(true)}
+                      />
+                      Use client defaults
+                    </label>
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input
+                        type="radio"
+                        name="attrMode"
+                        checked={!useClientAttributionDefaults}
+                        onChange={() => setUseClientAttributionDefaults(false)}
+                      />
+                      Customize attribution for this invoice
+                    </label>
+                  </div>
 
-            {formData.clientId && projects.length > 0 && (
-              <div className="space-y-2">
-                <Label htmlFor="projectId">From Project (Optional)</Label>
-                <Select
-                  id="projectId"
-                  value={formData.projectId}
-                  onChange={(e) => setFormData({ ...formData, projectId: e.target.value })}
-                >
-                  <option value="">No project</option>
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </Select>
-              </div>
+                  {!useClientAttributionDefaults && (
+                    <div className="space-y-3">
+                      {attributionRows.map((row, index) => (
+                        <div
+                          key={`attr-${index}`}
+                          className="grid grid-cols-1 md:grid-cols-5 gap-2 border rounded-md p-3"
+                        >
+                          <div className="space-y-1">
+                            <Label className="text-xs">User</Label>
+                            <Select
+                              value={row.userId}
+                              onChange={(e) => updateAttrRow(index, { userId: e.target.value })}
+                            >
+                              <option value="">Select…</option>
+                              {staffUsers.map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.name} ({u.email})
+                                </option>
+                              ))}
+                            </Select>
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Role</Label>
+                            <Select
+                              value={row.role}
+                              onChange={(e) =>
+                                updateAttrRow(index, { role: e.target.value as AttributionRole })
+                              }
+                            >
+                              <option value="FINDER">Finder</option>
+                              <option value="CLIENT_MANAGER">Client manager</option>
+                              <option value="PROJECT_MANAGER">Project manager</option>
+                            </Select>
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Split %</Label>
+                            <Input
+                              type="number"
+                              min={0}
+                              max={100}
+                              step={0.01}
+                              value={row.splitPercent}
+                              onChange={(e) =>
+                                updateAttrRow(index, { splitPercent: parseFloat(e.target.value) || 0 })
+                              }
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Fixed amount</Label>
+                            <Input
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={row.fixedAmount ?? ""}
+                              onChange={(e) =>
+                                updateAttrRow(index, {
+                                  fixedAmount: e.target.value === "" ? null : parseFloat(e.target.value) || 0,
+                                })
+                              }
+                            />
+                          </div>
+                          <div className="flex items-end">
+                            <Button type="button" variant="outline" size="sm" onClick={() => removeAttrRow(index)}>
+                              Remove
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                      <Button type="button" variant="outline" size="sm" onClick={addAttrRow}>
+                        Add row
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             )}
 
             <div className="space-y-2">
@@ -443,128 +480,6 @@ export default function NewBillPage() {
               </Select>
               <p className="text-xs text-gray-500">Select payment details to display at the bottom of the invoice PDF</p>
             </div>
-
-            {/* Unbilled Items Section */}
-            {(formData.projectId || (formData.clientId && !formData.projectId)) && (
-              <div className="space-y-4 border-t pt-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-semibold">Unbilled Items</h3>
-                  {unbilledItems && (unbilledItems.timesheetEntries.length > 0 || unbilledItems.charges.length > 0) && (
-                    <div className="flex space-x-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          const allTimesheetIds = unbilledItems.timesheetEntries.map(e => e.id)
-                          const allChargeIds = unbilledItems.charges.map(c => c.id)
-                          setSelectedTimesheetIds(allTimesheetIds)
-                          setSelectedChargeIds(allChargeIds)
-                        }}
-                      >
-                        Select All
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          setSelectedTimesheetIds([])
-                          setSelectedChargeIds([])
-                        }}
-                      >
-                        Clear All
-                      </Button>
-                    </div>
-                  )}
-                </div>
-
-                {loadingUnbilled ? (
-                  <p className="text-sm text-gray-500">Loading unbilled items...</p>
-                ) : unbilledItems && (unbilledItems.timesheetEntries.length > 0 || unbilledItems.charges.length > 0) ? (
-                  <div className="space-y-4">
-                    {unbilledItems.timesheetEntries.length > 0 && (
-                      <div>
-                        <h4 className="font-medium mb-2">Timesheet Entries</h4>
-                        <div className="space-y-2 max-h-60 overflow-y-auto border rounded p-3">
-                          {unbilledItems.timesheetEntries.map((entry) => (
-                            <label
-                              key={entry.id}
-                              className="flex items-center space-x-3 p-2 hover:bg-gray-50 rounded cursor-pointer"
-                            >
-                              <Checkbox
-                                checked={selectedTimesheetIds.includes(entry.id)}
-                                onCheckedChange={(checked) => {
-                                  if (checked) {
-                                    setSelectedTimesheetIds([...selectedTimesheetIds, entry.id])
-                                  } else {
-                                    setSelectedTimesheetIds(selectedTimesheetIds.filter(id => id !== entry.id))
-                                  }
-                                }}
-                              />
-                              <div className="flex-1 grid grid-cols-4 gap-2 text-sm">
-                                <span>{formatDate(entry.date)}</span>
-                                <span>{entry.user.name}</span>
-                                <span>{entry.hours}h @ {formatCurrency(entry.rate || 0)}</span>
-                                <span className="text-right font-medium">{formatCurrency(entry.amount)}</span>
-                              </div>
-                            </label>
-                          ))}
-                        </div>
-                        <p className="text-xs text-gray-500 mt-1">
-                          Total: {formatCurrency(unbilledItems.totals.timesheets)}
-                        </p>
-                      </div>
-                    )}
-
-                    {unbilledItems.charges.length > 0 && (
-                      <div>
-                        <h4 className="font-medium mb-2">Charges</h4>
-                        <div className="space-y-2 max-h-60 overflow-y-auto border rounded p-3">
-                          {unbilledItems.charges.map((charge) => (
-                            <label
-                              key={charge.id}
-                              className="flex items-center space-x-3 p-2 hover:bg-gray-50 rounded cursor-pointer"
-                            >
-                              <Checkbox
-                                checked={selectedChargeIds.includes(charge.id)}
-                                onCheckedChange={(checked) => {
-                                  if (checked) {
-                                    setSelectedChargeIds([...selectedChargeIds, charge.id])
-                                  } else {
-                                    setSelectedChargeIds(selectedChargeIds.filter(id => id !== charge.id))
-                                  }
-                                }}
-                              />
-                              <div className="flex-1 grid grid-cols-3 gap-2 text-sm">
-                                <span className="col-span-2">{charge.description}</span>
-                                <span className="text-right font-medium">{formatCurrency(charge.amount)}</span>
-                              </div>
-                            </label>
-                          ))}
-                        </div>
-                        <p className="text-xs text-gray-500 mt-1">
-                          Total: {formatCurrency(unbilledItems.totals.charges)}
-                        </p>
-                      </div>
-                    )}
-
-                    {(selectedTimesheetIds.length > 0 || selectedChargeIds.length > 0) && (
-                      <div className="p-3 bg-blue-50 border border-blue-200 rounded">
-                        <p className="text-sm font-medium text-blue-900">
-                          Selected: {selectedTimesheetIds.length} timesheet{selectedTimesheetIds.length !== 1 ? "s" : ""}, {selectedChargeIds.length} charge{selectedChargeIds.length !== 1 ? "s" : ""}
-                        </p>
-                        <p className="text-xs text-blue-700 mt-1">
-                          Subtotal will be calculated from selected items
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                ) : unbilledItems ? (
-                  <p className="text-sm text-gray-500">No unbilled items found for this {formData.projectId ? "project" : "client"}</p>
-                ) : null}
-              </div>
-            )}
 
             <div className="space-y-4 border-t pt-4">
               <h3 className="font-semibold">Discount</h3>
