@@ -1,5 +1,5 @@
 {
-  "buildCommand": "prisma generate && prisma db push --accept-data-loss && next build && node scripts/copy-pdfkit-fonts.js",
+  "buildCommand": "npx prisma generate && npx prisma db push --accept-data-loss && next build && node scripts/copy-pdfkit-fonts.js",
   "crons": [
     {
       "path": "/api/cron/check-outstanding-invoices",
