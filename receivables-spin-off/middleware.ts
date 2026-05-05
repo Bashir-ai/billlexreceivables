@@ -10,14 +10,6 @@ const disabledPrefixes = [
   "/proposals",
 ]
 
-const disabledApiPrefixes = [
-  "/api/projects",
-  "/api/todos",
-  "/api/proposals",
-  "/api/approvals",
-  "/api/timesheets",
-]
-
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
@@ -27,17 +19,11 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(url)
   }
 
-  if (disabledApiPrefixes.some((prefix) => pathname.startsWith(prefix))) {
-    return NextResponse.json(
-      { error: "Module disabled in CRM + Receivables mode" },
-      { status: 410 }
-    )
-  }
-
   return NextResponse.next()
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/api/:path*", "/proposals/:path*"],
+  // Keep middleware scope narrow to avoid impacting auth/API runtime on Vercel.
+  matcher: ["/dashboard/:path*", "/proposals/:path*"],
 }
 
