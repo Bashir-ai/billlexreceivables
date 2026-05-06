@@ -192,9 +192,10 @@ export async function POST(
 
     if (compensationTouchesFeeRules) {
       try {
-        const [{ resyncFinderAndManagementFeesForClientPaidBills }, clientLinks] = await Promise.all([
-          import("@/lib/attribution-fee-resync"),
-          prisma.client.findMany({
+        const { resyncFinderAndManagementFeesForClientPaidBills } = await import("@/lib/attribution-fee-resync")
+        let clientLinks: Array<{ id: string }> = []
+        try {
+          clientLinks = await prisma.client.findMany({
             where: {
               deletedAt: null,
               OR: [
@@ -204,8 +205,17 @@ export async function POST(
               ],
             },
             select: { id: true },
-          }),
-        ])
+          })
+        } catch {
+          // Backward-compat fallback for environments without management splits relation.
+          clientLinks = await prisma.client.findMany({
+            where: {
+              deletedAt: null,
+              OR: [{ finders: { some: { userId } } }, { clientManagerId: userId }],
+            },
+            select: { id: true },
+          })
+        }
 
         const uniqueClientIds = Array.from(new Set(clientLinks.map((c) => c.id)))
         for (const clientId of uniqueClientIds) {

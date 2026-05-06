@@ -2,7 +2,6 @@ import {
   BillAttributionRole,
   BillStatus,
   FinderFeeStatus,
-  ManagementAttributionRole,
   ManagementFeeRole,
 } from "@prisma/client"
 import { prisma } from "./prisma"
@@ -17,6 +16,16 @@ function resolveFeeLineStatus(paid: number, remaining: number): FinderFeeStatus 
   if (remaining <= 0.0001) return FinderFeeStatus.PAID
   if (paid > 0.0001) return FinderFeeStatus.PARTIALLY_PAID
   return FinderFeeStatus.PENDING
+}
+
+function supportsClientManagementSplits(): boolean {
+  try {
+    const model = (prisma as any)?._runtimeDataModel?.models?.Client
+    const fields = model?.fields
+    return Array.isArray(fields) && fields.some((f: any) => f?.name === "managementSplits")
+  } catch {
+    return false
+  }
 }
 
 type FinderRow = {
@@ -46,9 +55,7 @@ async function ensureClientFinderId(clientId: string, userId: string, splitPerce
   return created.id
 }
 
-function rowRoleToManagementFeeRole(
-  role: BillAttributionRole | ManagementAttributionRole
-): ManagementFeeRole | null {
+function rowRoleToManagementFeeRole(role: string): ManagementFeeRole | null {
   const roleValue = String(role)
   if (roleValue === "CLIENT_MANAGER") {
     return ManagementFeeRole.CLIENT_MANAGER
@@ -66,12 +73,13 @@ function rowRoleToManagementFeeRole(
 export async function resyncFinderAndManagementFeesForPaidBill(billId: string): Promise<void> {
   const bill = await prisma.bill.findUnique({
     where: { id: billId },
-    select: { id: true, status: true, paidAt: true, clientId: true },
+    select: { id: true, status: true, paidAt: true, submittedAt: true, createdAt: true, clientId: true },
   })
-  if (!bill || bill.status !== BillStatus.PAID || !bill.paidAt) {
+  if (!bill || bill.status !== BillStatus.PAID) {
     return
   }
   if (!bill.clientId) return
+  const earnedAt = bill.paidAt ?? bill.submittedAt ?? bill.createdAt
 
   const net = await calculateInvoiceNetAmount(billId)
 
@@ -84,6 +92,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
     // We can still derive rows from the current client rules below.
   }
 
+  const includeManagementSplits = supportsClientManagementSplits()
   const clientRules = await prisma.client.findUnique({
     where: { id: bill.clientId },
     select: {
@@ -92,12 +101,23 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
       finders: {
         select: { id: true, userId: true, finderFeePercent: true },
       },
-      managementSplits: {
-        select: { userId: true, role: true, splitPercent: true, fixedAmount: true },
-      },
-    },
+      ...(includeManagementSplits
+        ? {
+            managementSplits: {
+              select: { userId: true, role: true, splitPercent: true, fixedAmount: true },
+            },
+          }
+        : {}),
+    } as any,
   })
   if (!clientRules) return
+  const clientRuleRecord = clientRules as any
+  const resolvedClientId = String(clientRuleRecord.id)
+  const finderRuleRows: Array<{ id: string; userId: string; finderFeePercent: number }> = Array.isArray(
+    clientRuleRecord.finders
+  )
+    ? clientRuleRecord.finders
+    : []
 
   const finderRowMap = new Map<string, FinderRow>()
   for (const row of snapshot?.rows || []) {
@@ -111,7 +131,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
     })
   }
   // Include current client rules for recipients that did not exist in the locked snapshot
-  for (const finder of clientRules.finders) {
+  for (const finder of finderRuleRows) {
     if (!finderRowMap.has(finder.userId)) {
       finderRowMap.set(finder.userId, {
         userId: finder.userId,
@@ -137,7 +157,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
     const newStatus = resolveFeeLineStatus(paid, newRemaining)
     const clientFinderId =
       row.sourceClientFinderId ??
-      (await ensureClientFinderId(clientRules.id, row.userId, split))
+      (await ensureClientFinderId(resolvedClientId, row.userId, split))
 
     if (existing) {
       await prisma.finderFee.update({
@@ -156,7 +176,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
       await prisma.finderFee.create({
         data: {
           billId,
-          clientId: clientRules.id,
+          clientId: resolvedClientId,
           finderId: row.userId,
           clientFinderId,
           invoiceNetAmount: net,
@@ -164,7 +184,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
           finderFeeAmount: newFinderFeeAmount,
           remainingAmount: newRemaining,
           paidAmount: paid,
-          earnedAt: bill.paidAt,
+          earnedAt,
           status: newStatus,
           paidAt: newStatus === FinderFeeStatus.PAID ? new Date() : null,
         },
@@ -184,7 +204,10 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
       fixedAmount: row.fixedAmount ?? 0,
     })
   }
-  for (const split of clientRules.managementSplits) {
+  const managementSplits: Array<{ userId: string; role: string; splitPercent: number; fixedAmount: number | null }> =
+    Array.isArray(clientRuleRecord.managementSplits) ? clientRuleRecord.managementSplits : []
+
+  for (const split of managementSplits) {
     const role = rowRoleToManagementFeeRole(split.role)
     if (!role) continue
     const key = `${split.userId}|${role}`
@@ -197,11 +220,11 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
       })
     }
   }
-  if (clientRules.clientManagerId) {
-    const key = `${clientRules.clientManagerId}|${ManagementFeeRole.CLIENT_MANAGER}`
+  if (clientRuleRecord.clientManagerId) {
+    const key = `${clientRuleRecord.clientManagerId}|${ManagementFeeRole.CLIENT_MANAGER}`
     if (!mgmtMap.has(key)) {
       mgmtMap.set(key, {
-        userId: clientRules.clientManagerId,
+        userId: clientRuleRecord.clientManagerId,
         role: ManagementFeeRole.CLIENT_MANAGER,
         splitPercent: 100,
         fixedAmount: 0,
@@ -257,7 +280,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
       await prisma.managementFee.create({
         data: {
           billId,
-          clientId: clientRules.id,
+          clientId: resolvedClientId,
           recipientUserId,
           role: match.role,
           invoiceNetAmount: net,
@@ -267,7 +290,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
           status: newStatus,
           paidAmount: paid,
           remainingAmount: newRemaining,
-          earnedAt: bill.paidAt,
+          earnedAt,
           paidAt: newStatus === FinderFeeStatus.PAID ? new Date() : null,
         },
       })
@@ -283,8 +306,8 @@ export async function resyncFinderAndManagementFeesForClientPaidBills(
   maxBills = Number(process.env.FEE_BACKFILL_MAX_BILLS ?? 200)
 ): Promise<{ scannedBills: number }> {
   const paidBills = await prisma.bill.findMany({
-    where: { clientId, status: BillStatus.PAID, paidAt: { not: null }, deletedAt: null },
-    orderBy: { paidAt: "desc" },
+    where: { clientId, status: BillStatus.PAID, deletedAt: null },
+    orderBy: [{ paidAt: "desc" }, { createdAt: "desc" }],
     take: Math.max(1, maxBills),
     select: { id: true },
   })
