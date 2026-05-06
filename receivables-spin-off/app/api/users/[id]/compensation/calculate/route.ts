@@ -6,7 +6,11 @@ import { prisma } from "@/lib/prisma"
 import { UserRole, CompensationType } from "@prisma/client"
 import { z } from "zod"
 import { computeInvoiceNetAmountSync } from "@/lib/finder-fee-helpers"
-import { managementFeeLineFromPool, managementFeePoolDollars } from "@/lib/management-fee-helpers"
+import {
+  computeManagementFeeBaseSync,
+  managementFeeLineFromPool,
+  managementFeePoolDollars,
+} from "@/lib/management-fee-helpers"
 import { computeMonthlyBaseSalaryForPeriod, firstYearBonusScale } from "@/lib/compensation-anchors"
 
 function endOfMonth(year: number, month: number) {
@@ -390,7 +394,12 @@ export async function POST(
             (r.role === "CLIENT_MANAGER" || r.role === "PROJECT_MANAGER")
         )
         if (rows.length === 0) return sum
-        const basis = attributionBasis(bill)
+        const basis = computeManagementFeeBaseSync({
+          subtotal: bill.subtotal,
+          discountPercent: bill.discountPercent,
+          discountAmount: bill.discountAmount,
+          items: bill.items,
+        })
         const pool = managementFeePoolDollars(basis)
         const roleAmount = rows.reduce(
           (rowSum, row) =>

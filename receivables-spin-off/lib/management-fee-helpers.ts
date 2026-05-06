@@ -14,6 +14,51 @@ export function managementFeePoolDollars(invoiceNet: number): number {
   return (Math.max(0, invoiceNet) * MANAGEMENT_FEE_POOL_MAX_PERCENT) / 100
 }
 
+type ManagementBaseParts = {
+  subtotal: number | null
+  discountPercent: number | null
+  discountAmount: number | null
+  items: Array<{ amount: number; isCredit: boolean }>
+}
+
+/**
+ * Management fee base = invoiced amount before tax, after discount.
+ * Credit/reimbursement lines are NOT subtracted from this base.
+ */
+export function computeManagementFeeBaseSync(bill: ManagementBaseParts): number {
+  let subtotal = bill.subtotal || 0
+  if (subtotal === 0) {
+    subtotal = bill.items
+      .filter((item) => !item.isCredit)
+      .reduce((sum, item) => sum + item.amount, 0)
+  }
+
+  let discountValue = 0
+  if (bill.discountPercent && bill.discountPercent > 0) {
+    discountValue = (subtotal * bill.discountPercent) / 100
+  } else if (bill.discountAmount && bill.discountAmount > 0) {
+    discountValue = bill.discountAmount
+  }
+
+  return Math.max(0, subtotal - discountValue)
+}
+
+export async function calculateManagementFeeBaseAmount(billId: string): Promise<number> {
+  const bill = await prisma.bill.findUnique({
+    where: { id: billId },
+    include: { items: true },
+  })
+
+  if (!bill) throw new Error("Invoice not found")
+
+  return computeManagementFeeBaseSync({
+    subtotal: bill.subtotal,
+    discountPercent: bill.discountPercent,
+    discountAmount: bill.discountAmount,
+    items: bill.items.map((i) => ({ amount: i.amount, isCredit: i.isCredit })),
+  })
+}
+
 /**
  * @param poolDollars — typically 10% of net (see {@link managementFeePoolDollars}).
  * @param rowSplitPercent — share of that pool (0–100); 100% = full 10% of net in euros.
@@ -67,12 +112,13 @@ export async function calculateAndCreateManagementFees(billId: string): Promise<
   }
 
   const netAmount = await calculateInvoiceNetAmount(billId)
-  if (netAmount <= 0) {
+  const managementBaseAmount = await calculateManagementFeeBaseAmount(billId)
+  if (managementBaseAmount <= 0) {
     return
   }
 
   const earnedAt = bill.paidAt
-  const poolDollars = managementFeePoolDollars(netAmount)
+  const poolDollars = managementFeePoolDollars(managementBaseAmount)
 
   type Agg = { base: number; role: ManagementFeeRole }
   const byRecipient = new Map<string, Agg>()
@@ -117,7 +163,7 @@ export async function calculateAndCreateManagementFees(billId: string): Promise<
         clientId: bill.clientId,
         recipientUserId,
         role,
-        invoiceNetAmount: netAmount,
+        invoiceNetAmount: managementBaseAmount,
         attributionBaseAmount: base,
         compensationPercentApplied: MANAGEMENT_FEE_POOL_MAX_PERCENT,
         feeAmount,

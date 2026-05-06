@@ -7,6 +7,7 @@ import {
 import { prisma } from "./prisma"
 import { calculateInvoiceNetAmount } from "./finder-fee-helpers"
 import {
+  calculateManagementFeeBaseAmount,
   MANAGEMENT_FEE_POOL_MAX_PERCENT,
   managementFeeLineFromPool,
   managementFeePoolDollars,
@@ -81,7 +82,10 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
   if (!bill.clientId) return
   const earnedAt = bill.paidAt ?? bill.submittedAt ?? bill.createdAt
 
-  const net = await calculateInvoiceNetAmount(billId)
+  const [net, managementBase] = await Promise.all([
+    calculateInvoiceNetAmount(billId),
+    calculateManagementFeeBaseAmount(billId),
+  ])
 
   const snapshot = await prisma.billAttributionSnapshot.findFirst({
     where: { billId },
@@ -232,7 +236,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
     }
   }
 
-  const poolDollars = managementFeePoolDollars(net)
+  const poolDollars = managementFeePoolDollars(managementBase)
   const byRecipient = new Map<string, { base: number; role: ManagementFeeRole }>()
   for (const row of mgmtMap.values()) {
     const key = `${row.userId}|${row.role}`
@@ -267,7 +271,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
       await prisma.managementFee.update({
         where: { id: existing.id },
         data: {
-          invoiceNetAmount: net,
+          invoiceNetAmount: managementBase,
           attributionBaseAmount: match.base,
           compensationPercentApplied: MANAGEMENT_FEE_POOL_MAX_PERCENT,
           feeAmount: newFeeAmount,
@@ -283,7 +287,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
           clientId: resolvedClientId,
           recipientUserId,
           role: match.role,
-          invoiceNetAmount: net,
+          invoiceNetAmount: managementBase,
           attributionBaseAmount: match.base,
           compensationPercentApplied: MANAGEMENT_FEE_POOL_MAX_PERCENT,
           feeAmount: newFeeAmount,
