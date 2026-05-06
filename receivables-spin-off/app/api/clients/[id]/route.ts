@@ -412,6 +412,18 @@ export async function PUT(
       },
     })
 
+    if (validatedData.finders !== undefined || validatedData.managementSplits !== undefined) {
+      try {
+        const { resyncFinderAndManagementFeesForClientPaidBills } = await import(
+          "@/lib/attribution-fee-resync"
+        )
+        await resyncFinderAndManagementFeesForClientPaidBills(id)
+      } catch (error) {
+        // Do not block client update if fee backfill fails; user can retry by re-saving rules.
+        console.error("Error backfilling finder/management fees for paid invoices:", error)
+      }
+    }
+
     return NextResponse.json(client)
   } catch (error) {
     if (error instanceof z.ZodError) {

@@ -182,6 +182,41 @@ export async function POST(
       data: createData as any,
     })
 
+    // If compensation settings that govern finder/management payout changed, backfill paid-invoice
+    // fee lines for all clients where this user participates in finder/management attribution.
+    const compensationTouchesFeeRules =
+      validatedData.finderFeePercent !== undefined ||
+      validatedData.finderFeeFixedAmount !== undefined ||
+      validatedData.managementFeePercent !== undefined ||
+      validatedData.managementFeeFixedAmount !== undefined
+
+    if (compensationTouchesFeeRules) {
+      try {
+        const [{ resyncFinderAndManagementFeesForClientPaidBills }, clientLinks] = await Promise.all([
+          import("@/lib/attribution-fee-resync"),
+          prisma.client.findMany({
+            where: {
+              deletedAt: null,
+              OR: [
+                { finders: { some: { userId } } },
+                { managementSplits: { some: { userId } } },
+                { clientManagerId: userId },
+              ],
+            },
+            select: { id: true },
+          }),
+        ])
+
+        const uniqueClientIds = Array.from(new Set(clientLinks.map((c) => c.id)))
+        for (const clientId of uniqueClientIds) {
+          await resyncFinderAndManagementFeesForClientPaidBills(clientId)
+        }
+      } catch (error) {
+        // Do not block compensation save on backfill errors.
+        console.error("Error backfilling paid-invoice finder/management fee lines:", error)
+      }
+    }
+
     // Auto-calculate all elapsed periods in this compensation interval so the Accounts tab is immediately up to date.
     const now = new Date()
     const startCursor = new Date(
