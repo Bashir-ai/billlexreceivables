@@ -26,6 +26,8 @@ declare module "next-auth/jwt" {
     id: string
     role: UserRole
     timezone?: string
+    /** ms since epoch — used to throttle DB role refresh */
+    roleRefreshedAt?: number
   }
 }
 

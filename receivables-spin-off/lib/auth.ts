@@ -3,6 +3,9 @@ import CredentialsProvider from "next-auth/providers/credentials"
 import { prisma } from "./prisma"
 import bcrypt from "bcryptjs"
 
+/** Re-read role from DB periodically so promoted/demoted users get correct API access without signing out. */
+const ROLE_REFRESH_MS = 60_000
+
 export const authOptions: NextAuthOptions = {
   providers: [
     CredentialsProvider({
@@ -49,6 +52,26 @@ export const authOptions: NextAuthOptions = {
         token.id = user.id
         token.role = user.role
         token.timezone = (user as any).timezone || "UTC"
+        token.roleRefreshedAt = Date.now()
+        return token
+      }
+
+      const id = token.id as string | undefined
+      const last = typeof token.roleRefreshedAt === "number" ? token.roleRefreshedAt : 0
+      if (id && Date.now() - last > ROLE_REFRESH_MS) {
+        try {
+          const dbUser = await prisma.user.findUnique({
+            where: { id },
+            select: { role: true, timezone: true },
+          })
+          if (dbUser) {
+            token.role = dbUser.role
+            if (dbUser.timezone) token.timezone = dbUser.timezone
+          }
+          token.roleRefreshedAt = Date.now()
+        } catch {
+          // Keep existing token on transient DB errors
+        }
       }
       return token
     },

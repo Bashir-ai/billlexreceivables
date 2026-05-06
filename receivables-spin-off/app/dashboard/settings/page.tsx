@@ -14,6 +14,30 @@ import { JunkBox } from "@/components/settings/JunkBox"
 import { LogoUpload } from "@/components/settings/LogoUpload"
 import { canCreateUsers } from "@/lib/permissions"
 
+async function readJsonOrTextBody(response: Response): Promise<unknown> {
+  const text = await response.text()
+  if (!text.trim()) return null
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return { message: text.slice(0, 2000) }
+  }
+}
+
+function formatIntegrationFailure(label: string, response: Response, data: unknown): string {
+  const bits: string[] = [`HTTP ${response.status}`]
+  if (data && typeof data === "object") {
+    const d = data as Record<string, unknown>
+    const err = typeof d.error === "string" ? d.error : ""
+    const msg = typeof d.message === "string" ? d.message : ""
+    if (err) bits.push(err)
+    if (msg && msg !== err) bits.push(msg)
+    if ("details" in d && d.details !== undefined)
+      bits.push(typeof d.details === "string" ? d.details : JSON.stringify(d.details))
+  }
+  return bits.length > 1 ? `${label}: ${bits.join(" — ")}` : `${label} (${bits[0]})`
+}
+
 export default function SettingsPage() {
   const { data: session, update } = useSession()
   const router = useRouter()
@@ -130,15 +154,16 @@ export default function SettingsPage() {
       const response = await fetch("/api/integrations/avaza-sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
         body: JSON.stringify({
           startDate: syncStartDate || null,
           endDate: syncEndDate || null,
           dryRun: syncDryRun,
         }),
       })
-      const data = await response.json().catch(() => null)
+      const data = await readJsonOrTextBody(response)
       if (!response.ok) {
-        setSyncError(data?.error || data?.message || "Avaza sync failed")
+        setSyncError(formatIntegrationFailure("Avaza sync failed", response, data))
       } else {
         setSyncResult(data)
       }
@@ -156,10 +181,11 @@ export default function SettingsPage() {
     try {
       const response = await fetch("/api/integrations/avaza-sync/test", {
         method: "POST",
+        credentials: "same-origin",
       })
-      const data = await response.json().catch(() => null)
+      const data = await readJsonOrTextBody(response)
       if (!response.ok) {
-        setAvazaTestError(data?.error || data?.message || "Avaza connection test failed")
+        setAvazaTestError(formatIntegrationFailure("Avaza connection test failed", response, data))
       } else {
         setAvazaTestResult(data)
       }
