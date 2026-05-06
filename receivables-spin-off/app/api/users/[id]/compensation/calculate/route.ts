@@ -11,6 +11,7 @@ import {
   managementFeeLineFromPool,
   managementFeePoolDollars,
 } from "@/lib/management-fee-helpers"
+import { mapInvoiceLinkedPercentagePayoutTotals } from "@/lib/invoice-percentage-payouts"
 import { computeMonthlyBaseSalaryForPeriod, firstYearBonusScale } from "@/lib/compensation-anchors"
 
 function endOfMonth(year: number, month: number) {
@@ -199,12 +200,15 @@ export async function POST(
           discountAmount: bill.discountAmount,
           items: bill.items,
         })
+      const payoutTotalsByBill = await mapInvoiceLinkedPercentagePayoutTotals(
+        paidBills.map((b) => b.id)
+      )
 
       const finderFromBills = paidBills.reduce((sum, bill) => {
         const latest = bill.attributionSnapshots[0]
         const row = latest?.rows.find((r) => r.userId === userId && r.role === "FINDER")
         if (!row) return sum
-        const basis = attributionBasis(bill)
+        const basis = Math.max(0, attributionBasis(bill) - (payoutTotalsByBill.get(bill.id) ?? 0))
         return sum + basis * ((row.splitPercent || 0) / 100) + (row.fixedAmount || 0)
       }, 0)
       const finderEarnings = finderFromBills + (compensation.finderFeeFixedAmount || 0)
@@ -378,12 +382,15 @@ export async function POST(
           discountAmount: bill.discountAmount,
           items: bill.items,
         })
+      const payoutTotalsByBill = await mapInvoiceLinkedPercentagePayoutTotals(
+        paidBills.map((b) => b.id)
+      )
 
       const finderAmount = paidBills.reduce((sum, bill) => {
         const latest = bill.attributionSnapshots[0]
         const row = latest?.rows.find((r) => r.userId === userId && r.role === "FINDER")
         if (!row) return sum
-        const basis = attributionBasis(bill)
+        const basis = Math.max(0, attributionBasis(bill) - (payoutTotalsByBill.get(bill.id) ?? 0))
         return sum + basis * ((row.splitPercent || 0) / 100) + (row.fixedAmount || 0)
       }, 0)
       const managementAmount = paidBills.reduce((sum, bill) => {
@@ -394,12 +401,13 @@ export async function POST(
             (r.role === "CLIENT_MANAGER" || r.role === "PROJECT_MANAGER")
         )
         if (rows.length === 0) return sum
-        const basis = computeManagementFeeBaseSync({
+        const baseBeforePayout = computeManagementFeeBaseSync({
           subtotal: bill.subtotal,
           discountPercent: bill.discountPercent,
           discountAmount: bill.discountAmount,
           items: bill.items,
         })
+        const basis = Math.max(0, baseBeforePayout - (payoutTotalsByBill.get(bill.id) ?? 0))
         const pool = managementFeePoolDollars(basis)
         const roleAmount = rows.reduce(
           (rowSum, row) =>

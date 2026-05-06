@@ -5,7 +5,7 @@ import {
   ManagementFeeRole,
 } from "@prisma/client"
 import { prisma } from "./prisma"
-import { calculateInvoiceNetAmount } from "./finder-fee-helpers"
+import { calculateFinderFeeBaseAmount } from "./finder-fee-helpers"
 import {
   calculateManagementFeeBaseAmount,
   MANAGEMENT_FEE_POOL_MAX_PERCENT,
@@ -82,8 +82,8 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
   if (!bill.clientId) return
   const earnedAt = bill.paidAt ?? bill.submittedAt ?? bill.createdAt
 
-  const [net, managementBase] = await Promise.all([
-    calculateInvoiceNetAmount(billId),
+  const [finderBase, managementBase] = await Promise.all([
+    calculateFinderFeeBaseAmount(billId),
     calculateManagementFeeBaseAmount(billId),
   ])
 
@@ -153,7 +153,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
     const split = row.splitPercent || 0
     const fixed = row.fixedAmount ?? 0
     if (split <= 0 && fixed <= 0) continue
-    const rawNew = (net * split) / 100 + fixed
+    const rawNew = (finderBase * split) / 100 + fixed
     const existing = existingFinderByUser.get(row.userId)
     const paid = existing?.paidAmount ?? 0
     const newFinderFeeAmount = Math.max(rawNew, paid)
@@ -168,7 +168,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
         where: { id: existing.id },
         data: {
           clientFinderId,
-          invoiceNetAmount: net,
+          invoiceNetAmount: finderBase,
           finderFeePercent: split,
           finderFeeAmount: newFinderFeeAmount,
           remainingAmount: newRemaining,
@@ -183,7 +183,7 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
           clientId: resolvedClientId,
           finderId: row.userId,
           clientFinderId,
-          invoiceNetAmount: net,
+          invoiceNetAmount: finderBase,
           finderFeePercent: split,
           finderFeeAmount: newFinderFeeAmount,
           remainingAmount: newRemaining,

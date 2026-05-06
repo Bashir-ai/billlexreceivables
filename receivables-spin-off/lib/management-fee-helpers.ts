@@ -5,7 +5,7 @@ import {
   Prisma,
 } from "@prisma/client"
 import { prisma } from "./prisma"
-import { calculateInvoiceNetAmount } from "./finder-fee-helpers"
+import { sumInvoiceLinkedPercentagePayouts } from "./invoice-percentage-payouts"
 
 /** Management fee pool is at most this % of invoice net; split% on a row is share of this pool. */
 export const MANAGEMENT_FEE_POOL_MAX_PERCENT = 10
@@ -51,12 +51,14 @@ export async function calculateManagementFeeBaseAmount(billId: string): Promise<
 
   if (!bill) throw new Error("Invoice not found")
 
-  return computeManagementFeeBaseSync({
+  const baseBeforePayouts = computeManagementFeeBaseSync({
     subtotal: bill.subtotal,
     discountPercent: bill.discountPercent,
     discountAmount: bill.discountAmount,
     items: bill.items.map((i) => ({ amount: i.amount, isCredit: i.isCredit })),
   })
+  const percentagePayoutTotal = await sumInvoiceLinkedPercentagePayouts(billId)
+  return Math.max(0, baseBeforePayouts - percentagePayoutTotal)
 }
 
 /**
@@ -111,7 +113,6 @@ export async function calculateAndCreateManagementFees(billId: string): Promise<
     return
   }
 
-  const netAmount = await calculateInvoiceNetAmount(billId)
   const managementBaseAmount = await calculateManagementFeeBaseAmount(billId)
   if (managementBaseAmount <= 0) {
     return

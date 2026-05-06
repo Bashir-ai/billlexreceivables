@@ -279,6 +279,8 @@ model User {
   finderFeePayments       FinderFeePayment[]  @relation("FinderFeePaymentBy")
   managementFees          ManagementFee[]     @relation("ManagementFeeRecipient")
   managementFeePayments ManagementFeePayment[] @relation("ManagementFeePaymentBy")
+  invoicePercentagePayouts InvoicePercentagePayout[] @relation("InvoicePercentagePayoutRecipient")
+  createdInvoicePercentagePayouts InvoicePercentagePayout[] @relation("InvoicePercentagePayoutCreator")
   createdLeads            Lead[]              @relation("LeadCreator")
   managedLeads            Lead[]              @relation("LeadManager")
   leadInteractions        LeadInteraction[]  @relation("LeadInteractionCreator")
@@ -674,6 +676,7 @@ model Bill {
   todos          Todo[]
   finderFees       FinderFee[] // Finder fees generated when invoice is paid
   managementFees   ManagementFee[]
+  percentagePayouts InvoicePercentagePayout[]
   installmentInvoices InstallmentInvoice[]
   expenses       ProjectExpense[] // Expenses billed on this invoice
   compensationEligibility CompensationEligibility[] @relation("EligibilityBill")
@@ -1234,6 +1237,25 @@ model ManagementFeePayment {
 
   managementFee ManagementFee @relation(fields: [managementFeeId], references: [id], onDelete: Cascade)
   paidByUser    User          @relation("ManagementFeePaymentBy", fields: [paidBy], references: [id])
+}
+
+model InvoicePercentagePayout {
+  id        String   @id @default(cuid())
+  billId    String
+  userId    String
+  amount    Float
+  notes     String?
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bill      Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  user      User @relation("InvoicePercentagePayoutRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  creator   User @relation("InvoicePercentagePayoutCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@index([billId])
+  @@index([userId])
+  @@index([createdBy])
 }
 
 model Lead {

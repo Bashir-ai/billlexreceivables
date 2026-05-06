@@ -1,5 +1,6 @@
 import { prisma } from "./prisma"
 import { BillAttributionRole, BillStatus } from "@prisma/client"
+import { sumInvoiceLinkedPercentagePayouts } from "./invoice-percentage-payouts"
 
 type BillNetParts = {
   subtotal: number | null
@@ -60,6 +61,14 @@ export async function calculateInvoiceNetAmount(billId: string): Promise<number>
     discountAmount: bill.discountAmount,
     items: bill.items.map((i) => ({ amount: i.amount, isCredit: i.isCredit })),
   })
+}
+
+export async function calculateFinderFeeBaseAmount(billId: string): Promise<number> {
+  const [netAmount, percentagePayoutTotal] = await Promise.all([
+    calculateInvoiceNetAmount(billId),
+    sumInvoiceLinkedPercentagePayouts(billId),
+  ])
+  return Math.max(0, netAmount - percentagePayoutTotal)
 }
 
 /**
@@ -157,7 +166,7 @@ export async function calculateAndCreateFinderFees(billId: string): Promise<void
   }
 
   // Calculate net invoice amount
-  const netAmount = await calculateInvoiceNetAmount(billId)
+  const netAmount = await calculateFinderFeeBaseAmount(billId)
 
   if (netAmount <= 0) {
     // No net amount, nothing to calculate
