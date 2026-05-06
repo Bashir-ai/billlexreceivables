@@ -6,13 +6,27 @@ import { z } from "zod"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { supportsInvoicePercentagePayouts } from "@/lib/invoice-percentage-payouts"
-import { UserRole } from "@prisma/client"
+import { CompensationType, UserRole } from "@prisma/client"
 
 const createSchema = z.object({
   userId: z.string().min(1),
   amount: z.number().positive(),
   notes: z.string().optional().nullable(),
 })
+
+async function isQualifiedPercentageBasedUser(userId: string, anchorDate: Date): Promise<boolean> {
+  const record = await prisma.userCompensation.findFirst({
+    where: {
+      userId,
+      compensationType: CompensationType.PERCENTAGE_BASED,
+      effectiveFrom: { lte: anchorDate },
+      OR: [{ effectiveTo: null }, { effectiveTo: { gte: anchorDate } }],
+    },
+    select: { id: true },
+    orderBy: { effectiveFrom: "desc" },
+  })
+  return Boolean(record)
+}
 
 export async function GET(
   _request: Request,
@@ -77,6 +91,14 @@ export async function POST(
       select: { id: true },
     })
     if (!user) return NextResponse.json({ error: "Recipient user not found" }, { status: 404 })
+    const anchorDate = new Date()
+    const isQualified = await isQualifiedPercentageBasedUser(validated.userId, anchorDate)
+    if (!isQualified) {
+      return NextResponse.json(
+        { error: "Recipient must have an active PERCENTAGE_BASED compensation profile" },
+        { status: 400 }
+      )
+    }
 
     const created = await (prisma as any).invoicePercentagePayout.create({
       data: {

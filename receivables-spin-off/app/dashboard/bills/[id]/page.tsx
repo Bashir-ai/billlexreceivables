@@ -215,7 +215,16 @@ export default async function BillDetailPage({ params }: { params: Promise<{ id:
     : []
   const payoutUsers = canManagePercentagePayouts
     ? await prisma.user.findMany({
-        where: { role: { not: "CLIENT" } },
+        where: {
+          role: { not: "CLIENT" },
+          compensations: {
+            some: {
+              compensationType: "PERCENTAGE_BASED",
+              effectiveFrom: { lte: new Date() },
+              OR: [{ effectiveTo: null }, { effectiveTo: { gte: new Date() } }],
+            },
+          },
+        },
         select: { id: true, name: true, email: true },
         orderBy: { name: "asc" },
       })
@@ -396,6 +405,11 @@ export default async function BillDetailPage({ params }: { params: Promise<{ id:
                   <Button type="submit">Add payout entry</Button>
                 </form>
               )}
+              {canManagePercentagePayouts && payoutUsers.length === 0 ? (
+                <p className="text-xs text-amber-700">
+                  No users currently qualify with active percentage-based compensation profiles.
+                </p>
+              ) : null}
 
               {percentagePayouts.length === 0 ? (
                 <p className="text-sm text-gray-500">No invoice-linked percentage payouts recorded.</p>

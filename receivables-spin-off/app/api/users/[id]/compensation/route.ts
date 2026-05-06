@@ -128,6 +128,26 @@ export async function POST(
       if (!validatedData.percentageType) {
         return NextResponse.json({ error: "Percentage type is required for percentage-based compensation" }, { status: 400 })
       }
+      if (
+        validatedData.finderFeePercent !== undefined &&
+        validatedData.finderFeePercent !== null &&
+        validatedData.finderFeePercent < 0
+      ) {
+        return NextResponse.json(
+          { error: "Finder fee percent must be 0 or greater for percentage-based compensation" },
+          { status: 400 }
+        )
+      }
+      if (
+        validatedData.finderFeeFixedAmount !== undefined &&
+        validatedData.finderFeeFixedAmount !== null &&
+        validatedData.finderFeeFixedAmount < 0
+      ) {
+        return NextResponse.json(
+          { error: "Finder fee fixed amount must be 0 or greater for percentage-based compensation" },
+          { status: 400 }
+        )
+      }
       if (validatedData.percentageType === "PROJECT_TOTAL" || validatedData.percentageType === "BOTH") {
         if (!validatedData.projectPercentage || validatedData.projectPercentage <= 0) {
           return NextResponse.json({ error: "Project percentage is required" }, { status: 400 })

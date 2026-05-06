@@ -373,6 +373,31 @@ export default function UserCompensationPage() {
                   />
                 </div>
               </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Finder fee % (optional)</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    value={formData.finderFeePercent}
+                    onChange={(e) => setFormData({ ...formData, finderFeePercent: e.target.value })}
+                    placeholder="e.g., 5"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Finder fee fixed amount (optional)</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={formData.finderFeeFixedAmount}
+                    onChange={(e) => setFormData({ ...formData, finderFeeFixedAmount: e.target.value })}
+                    placeholder="e.g., 250"
+                  />
+                </div>
+              </div>
             </fieldset>
 
             <div className={cn("space-y-4 rounded-md border p-4", !showSbfmBlock && "opacity-60")}>
@@ -620,6 +645,18 @@ export default function UserCompensationPage() {
                     <div>
                       <span className="text-sm font-medium text-gray-600">Direct Work Percentage: </span>
                       <span className="font-semibold">{compensation.directWorkPercentage}%</span>
+                    </div>
+                  )}
+                  {compensation.finderFeePercent != null && (
+                    <div>
+                      <span className="text-sm font-medium text-gray-600">Finder fee %: </span>
+                      <span className="font-semibold">{compensation.finderFeePercent}%</span>
+                    </div>
+                  )}
+                  {compensation.finderFeeFixedAmount != null && compensation.finderFeeFixedAmount > 0 && (
+                    <div>
+                      <span className="text-sm font-medium text-gray-600">Finder fee fixed add-on: </span>
+                      <span className="font-semibold">{formatCurrency(compensation.finderFeeFixedAmount)}</span>
                     </div>
                   )}
                 </>
