@@ -63,6 +63,7 @@ export async function runAvazaSync(options: RunOptions = {}) {
   const startedAt = new Date()
   const requestedStart = parseDate(options.startDate)
   const requestedEnd = parseDate(options.endDate)
+  const hasManualWindow = Boolean(requestedStart || requestedEnd)
 
   const run = await prisma.integrationSyncRun.create({
     data: { provider: "avaza", scope: "clients_invoices", dryRun, startedAt },
@@ -74,11 +75,13 @@ export async function runAvazaSync(options: RunOptions = {}) {
     })
     // Default floor: import/sync only invoices from Jan 1, 2026 onward unless a later start is requested.
     const checkpoint = state?.lastSyncedAt ?? null
+    // For manual date-window runs, honor the requested range and ignore checkpoint progress.
+    const checkpointMs = hasManualWindow ? 0 : checkpoint?.getTime() ?? 0
     const updatedSince = new Date(
       Math.max(
         DEFAULT_SYNC_START.getTime(),
         requestedStart?.getTime() ?? 0,
-        checkpoint?.getTime() ?? 0
+        checkpointMs
       )
     )
 
