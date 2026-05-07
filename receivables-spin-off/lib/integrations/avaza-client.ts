@@ -188,5 +188,36 @@ export class AvazaClient {
         updated_at: i.DateUpdated,
       }))
   }
+
+  async listInvoicesPage(
+    updatedSince: Date | undefined,
+    pageNumber: number,
+    pageSize = 100
+  ): Promise<{ invoices: AvazaInvoice[]; totalCount: number; pageSize: number; pageNumber: number }> {
+    const q = new URLSearchParams()
+    q.set("PageNumber", String(pageNumber))
+    q.set("PageSize", String(pageSize))
+    if (updatedSince) q.set("UpdatedSince", updatedSince.toISOString())
+    const payload = await this.request<any>(`/api/Invoice?${q.toString()}`)
+    const rows = Array.isArray(payload?.Invoices) ? (payload.Invoices as AvazaInvoiceApi[]) : []
+    const invoices = rows
+      .filter((i) => i.TransactionID !== undefined && i.TransactionID !== null)
+      .map((i) => ({
+        id: String(i.TransactionID),
+        invoice_number: i.InvoiceNumber || undefined,
+        party_id: i.CompanyIDFK !== undefined && i.CompanyIDFK !== null ? String(i.CompanyIDFK) : undefined,
+        status: i.TransactionStatusCode || undefined,
+        total: i.TotalAmount,
+        issue_date: i.DateIssued,
+        due_date: i.DueDate,
+        updated_at: i.DateUpdated,
+      }))
+    return {
+      invoices,
+      totalCount: Number(payload?.TotalCount ?? invoices.length) || invoices.length,
+      pageSize: Number(payload?.PageSize ?? pageSize) || pageSize,
+      pageNumber,
+    }
+  }
 }
 

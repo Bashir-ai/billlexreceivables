@@ -12,8 +12,9 @@ type RunOptions = {
 type MappedInvoice = ReturnType<typeof mapInvoice>
 
 const DEFAULT_SYNC_START = new Date("2026-01-01T00:00:00.000Z")
-const DEFAULT_CHUNK_DAYS = 30
 const DEFAULT_DB_BATCH_SIZE = 200
+const DEFAULT_INVOICE_PAGE_SIZE = 100
+const DEFAULT_MAX_PAGES_PER_RUN = 8
 
 function clampToValidDate(d: Date | null | undefined): Date | null {
   if (!d) return null
@@ -129,9 +130,9 @@ export async function runAvazaSync(options: RunOptions = {}) {
     let fetchedInvoicesCount = 0
     let chunkCount = 0
     let truncated = false
-    const chunkDays = Number(process.env.AVAZA_SYNC_CHUNK_DAYS ?? DEFAULT_CHUNK_DAYS)
-    const maxChunks = Number(process.env.AVAZA_SYNC_MAX_CHUNKS ?? 24)
     const dbBatchSize = Number(process.env.AVAZA_SYNC_DB_BATCH_SIZE ?? DEFAULT_DB_BATCH_SIZE)
+    const invoicePageSize = Number(process.env.AVAZA_SYNC_INVOICE_PAGE_SIZE ?? DEFAULT_INVOICE_PAGE_SIZE)
+    const maxPagesPerRun = Number(process.env.AVAZA_SYNC_MAX_PAGES_PER_RUN ?? DEFAULT_MAX_PAGES_PER_RUN)
 
     // If end is before start (or equal), treat as a no-op.
     if (effectiveEnd.getTime() < updatedSince.getTime()) {
@@ -149,8 +150,8 @@ export async function runAvazaSync(options: RunOptions = {}) {
             requestedEnd: requestedEnd?.toISOString() ?? null,
             effectiveStart: updatedSince.toISOString(),
             effectiveEnd: effectiveEnd.toISOString(),
-            chunkDays,
             chunkCount: 0,
+            skippedCount,
           }),
         },
       })
@@ -222,43 +223,43 @@ export async function runAvazaSync(options: RunOptions = {}) {
       }
     }
 
-    // Fetch invoices once, then process in local time chunks.
-    // This avoids repeated "UpdatedSince=chunkStart" full scans that can hit function timeouts.
-    const allInvoices = await client.listInvoices(updatedSince)
-    fetchedInvoicesCount = allInvoices.length
-
-    const invoicesWithCandidate = allInvoices
-      .map((inv) => ({ inv, candidate: resolveInvoiceCandidateDate(inv) }))
-      .filter(({ candidate }) => {
-        if (!candidate) return true
-        if (candidate.getTime() < updatedSince.getTime()) return false
-        if (candidate.getTime() > effectiveEnd.getTime()) return false
-        return true
-      })
-
-    const sortedInvoices = invoicesWithCandidate.sort((a, b) => {
-      const at = a.candidate?.getTime() ?? updatedSince.getTime()
-      const bt = b.candidate?.getTime() ?? updatedSince.getTime()
-      return at - bt
+    const cursorKey = JSON.stringify({
+      kind: "invoice_pages_v1",
+      updatedSince: updatedSince.toISOString(),
+      effectiveEnd: effectiveEnd.toISOString(),
+      hasManualWindow,
+      requestedStart: requestedStart?.toISOString() ?? null,
+      requestedEnd: requestedEnd?.toISOString() ?? null,
     })
-
-    let cursorStart = new Date(updatedSince)
-    let lastChunkEnd = cursorStart
-    while (cursorStart.getTime() < effectiveEnd.getTime()) {
-      chunkCount++
-      if (chunkCount > maxChunks) {
-        truncated = true
-        break
+    let cursorPage = 1
+    if (!dryRun && state?.cursor) {
+      try {
+        const parsed = JSON.parse(state.cursor)
+        if (parsed?.key === cursorKey && typeof parsed?.nextPage === "number" && parsed.nextPage > 0) {
+          cursorPage = parsed.nextPage
+        }
+      } catch {
+        cursorPage = 1
       }
+    }
 
-      const chunkStart = new Date(cursorStart)
-      const chunkEndExclusive = toChunkedEnd(chunkStart, chunkDays, effectiveEnd)
-      lastChunkEnd = new Date(chunkEndExclusive)
+    let page = cursorPage
+    let pagesProcessed = 0
+    let totalPages = 1
+    while (page <= totalPages) {
+      const pagePayload = await client.listInvoicesPage(updatedSince, page, Math.max(1, invoicePageSize))
+      const currentPageSize = Math.max(1, pagePayload.pageSize)
+      totalPages = Math.max(1, Math.ceil(pagePayload.totalCount / currentPageSize))
+      fetchedInvoicesCount += pagePayload.invoices.length
 
-      const filteredInvoices = sortedInvoices.filter(({ candidate }) => {
-        if (!candidate) return chunkStart.getTime() === updatedSince.getTime()
-        return candidate.getTime() >= chunkStart.getTime() && candidate.getTime() < chunkEndExclusive.getTime()
-      })
+      const filteredInvoices = pagePayload.invoices
+        .map((inv) => ({ inv, candidate: resolveInvoiceCandidateDate(inv) }))
+        .filter(({ candidate }) => {
+          if (!candidate) return true
+          if (candidate.getTime() < updatedSince.getTime()) return false
+          if (candidate.getTime() > effectiveEnd.getTime()) return false
+          return true
+        })
 
       for (let i = 0; i < filteredInvoices.length; i += Math.max(1, dbBatchSize)) {
         const batch = filteredInvoices.slice(i, i + Math.max(1, dbBatchSize))
@@ -384,16 +385,28 @@ export async function runAvazaSync(options: RunOptions = {}) {
       }
       }
 
-      // Advance the checkpoint per chunk so the next run doesn't redo everything we already processed.
+      chunkCount++
+      pagesProcessed++
+
+      // Update progress after each page so we can resume from cursor if this invocation is cut short.
       if (!dryRun) {
         await prisma.integrationSyncState.upsert({
           where: { provider_scope: { provider: "avaza", scope: "clients_invoices" } },
           create: {
             provider: "avaza",
             scope: "clients_invoices",
-            lastSyncedAt: lastChunkEnd,
+            lastSyncedAt: state?.lastSyncedAt ?? null,
+            cursor:
+              page < totalPages
+                ? JSON.stringify({ key: cursorKey, nextPage: page + 1 })
+                : null,
           },
-          update: { lastSyncedAt: lastChunkEnd },
+          update: {
+            cursor:
+              page < totalPages
+                ? JSON.stringify({ key: cursorKey, nextPage: page + 1 })
+                : null,
+          },
         })
 
         await prisma.integrationSyncRun.update({
@@ -409,7 +422,6 @@ export async function runAvazaSync(options: RunOptions = {}) {
               effectiveStart: updatedSince.toISOString(),
               defaultStart: DEFAULT_SYNC_START.toISOString(),
               effectiveEnd: effectiveEnd.toISOString(),
-              chunkDays,
               chunkCount,
               truncated,
               skippedCount,
@@ -418,22 +430,27 @@ export async function runAvazaSync(options: RunOptions = {}) {
         })
       }
 
-      // Move to next chunk (exclusive end to prevent overlaps).
-      cursorStart = new Date(chunkEndExclusive.getTime() + 1)
-      // Avoid infinite loops if clock skew / weird inputs.
-      if (cursorStart.getTime() <= chunkStart.getTime()) break
+      if (pagesProcessed >= Math.max(1, maxPagesPerRun) && page < totalPages) {
+        truncated = true
+        break
+      }
+      page += 1
     }
 
     if (!dryRun) {
-      // State is advanced per chunk above. This is a final safety update for cases where no chunk ran.
+      const shouldAdvanceCheckpoint = !truncated
       await prisma.integrationSyncState.upsert({
         where: { provider_scope: { provider: "avaza", scope: "clients_invoices" } },
         create: {
           provider: "avaza",
           scope: "clients_invoices",
-          lastSyncedAt: lastChunkEnd,
+          lastSyncedAt: shouldAdvanceCheckpoint ? effectiveEnd : state?.lastSyncedAt ?? null,
+          cursor: truncated ? JSON.stringify({ key: cursorKey, nextPage: page + 1 }) : null,
         },
-        update: { lastSyncedAt: lastChunkEnd },
+        update: {
+          ...(shouldAdvanceCheckpoint ? { lastSyncedAt: effectiveEnd } : {}),
+          cursor: truncated ? JSON.stringify({ key: cursorKey, nextPage: page + 1 }) : null,
+        },
       })
     }
 
@@ -452,7 +469,6 @@ export async function runAvazaSync(options: RunOptions = {}) {
           effectiveStart: updatedSince.toISOString(),
           defaultStart: DEFAULT_SYNC_START.toISOString(),
           effectiveEnd: effectiveEnd.toISOString(),
-          chunkDays,
           chunkCount,
           truncated,
           skippedCount,
