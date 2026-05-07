@@ -307,18 +307,32 @@ export async function resyncFinderAndManagementFeesForPaidBill(billId: string): 
  */
 export async function resyncFinderAndManagementFeesForClientPaidBills(
   clientId: string,
-  maxBills = Number(process.env.FEE_BACKFILL_MAX_BILLS ?? 200)
+  maxBills?: number
 ): Promise<{ scannedBills: number }> {
-  const paidBills = await prisma.bill.findMany({
-    where: { clientId, status: BillStatus.PAID, deletedAt: null },
-    orderBy: [{ paidAt: "desc" }, { createdAt: "desc" }],
-    take: Math.max(1, maxBills),
-    select: { id: true },
-  })
+  const batchSize = Math.max(1, Number(process.env.FEE_BACKFILL_BATCH_SIZE ?? 200))
+  const limit = typeof maxBills === "number" && Number.isFinite(maxBills) && maxBills > 0 ? Math.floor(maxBills) : null
+  let scannedBills = 0
+  let offset = 0
 
-  for (const bill of paidBills) {
-    await resyncFinderAndManagementFeesForPaidBill(bill.id)
+  while (true) {
+    const remaining = limit === null ? batchSize : Math.max(0, limit - scannedBills)
+    if (remaining === 0) break
+    const take = Math.min(batchSize, remaining)
+    const paidBills = await prisma.bill.findMany({
+      where: { clientId, status: BillStatus.PAID, deletedAt: null },
+      orderBy: [{ paidAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      skip: offset,
+      take,
+      select: { id: true },
+    })
+    if (paidBills.length === 0) break
+
+    for (const bill of paidBills) {
+      await resyncFinderAndManagementFeesForPaidBill(bill.id)
+      scannedBills += 1
+    }
+    offset += paidBills.length
   }
 
-  return { scannedBills: paidBills.length }
+  return { scannedBills }
 }
