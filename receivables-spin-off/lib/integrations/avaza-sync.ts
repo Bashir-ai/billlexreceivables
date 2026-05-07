@@ -9,6 +9,8 @@ type RunOptions = {
   endDate?: string | null
 }
 
+type MappedInvoice = ReturnType<typeof mapInvoice>
+
 const DEFAULT_SYNC_START = new Date("2026-01-01T00:00:00.000Z")
 const DEFAULT_CHUNK_DAYS = 30
 const DEFAULT_DB_BATCH_SIZE = 200
@@ -44,6 +46,37 @@ function resolveInvoiceCandidateDate(inv: {
   if (updated && !Number.isNaN(updated.getTime())) return updated
   if (paid && !Number.isNaN(paid.getTime())) return paid
   return null
+}
+
+function billNeedsUpdate(
+  existing: {
+    clientId: string | null
+    status: BillStatus
+    amount: number
+    subtotal: number | null
+    invoiceNumber: string | null
+    dueDate: Date | null
+    paidAt: Date | null
+    submittedAt: Date | null
+    approvedAt: Date | null
+    avazaUpdatedAt: Date | null
+  },
+  mapped: MappedInvoice,
+  linkedClientId: string | null
+): boolean {
+  const toMs = (d: Date | null | undefined) => (d ? d.getTime() : null)
+  return !(
+    existing.clientId === linkedClientId &&
+    existing.status === mapped.status &&
+    existing.amount === mapped.amount &&
+    (existing.subtotal ?? null) === (mapped.subtotal ?? null) &&
+    (existing.invoiceNumber ?? null) === (mapped.invoiceNumber ?? null) &&
+    toMs(existing.dueDate) === toMs(mapped.dueDate) &&
+    toMs(existing.paidAt) === toMs(mapped.paidAt) &&
+    toMs(existing.submittedAt) === toMs(mapped.submittedAt) &&
+    toMs(existing.approvedAt) === toMs(mapped.approvedAt) &&
+    toMs(existing.avazaUpdatedAt) === toMs(mapped.avazaUpdatedAt)
+  )
 }
 
 async function resolveCreatedByUserId(db: PrismaClient): Promise<string> {
@@ -92,6 +125,7 @@ export async function runAvazaSync(options: RunOptions = {}) {
     let createdCount = 0
     let updatedCount = 0
     let failedCount = 0
+    let skippedCount = 0
     let fetchedInvoicesCount = 0
     let chunkCount = 0
     let truncated = false
@@ -228,20 +262,94 @@ export async function runAvazaSync(options: RunOptions = {}) {
 
       for (let i = 0; i < filteredInvoices.length; i += Math.max(1, dbBatchSize)) {
         const batch = filteredInvoices.slice(i, i + Math.max(1, dbBatchSize))
-        for (const { inv } of batch) {
-        const mapped = mapInvoice(inv)
+        const mappedBatch = batch.map(({ inv }) => ({ inv, mapped: mapInvoice(inv) }))
+        const externalIds = mappedBatch.map(({ mapped }) => mapped.avazaExternalId)
+        const invoiceNumbers = mappedBatch
+          .map(({ mapped }) => mapped.invoiceNumber)
+          .filter((n): n is string => Boolean(n))
+
+        const existingByExternalId = new Map<
+          string,
+          {
+            id: string
+            clientId: string | null
+            status: BillStatus
+            amount: number
+            subtotal: number | null
+            invoiceNumber: string | null
+            dueDate: Date | null
+            paidAt: Date | null
+            submittedAt: Date | null
+            approvedAt: Date | null
+            avazaUpdatedAt: Date | null
+          }
+        >()
+        const existingByInvoiceNumber = new Map<
+          string,
+          {
+            id: string
+            clientId: string | null
+            status: BillStatus
+            amount: number
+            subtotal: number | null
+            invoiceNumber: string | null
+            dueDate: Date | null
+            paidAt: Date | null
+            submittedAt: Date | null
+            approvedAt: Date | null
+            avazaUpdatedAt: Date | null
+          }
+        >()
+
+        const existingByExternal = await prisma.bill.findMany({
+          where: { deletedAt: null, avazaExternalId: { in: externalIds } },
+          select: {
+            id: true,
+            clientId: true,
+            status: true,
+            amount: true,
+            subtotal: true,
+            invoiceNumber: true,
+            dueDate: true,
+            paidAt: true,
+            submittedAt: true,
+            approvedAt: true,
+            avazaUpdatedAt: true,
+            avazaExternalId: true,
+          },
+        })
+        for (const row of existingByExternal) {
+          if (row.avazaExternalId) existingByExternalId.set(row.avazaExternalId, row)
+        }
+
+        if (invoiceNumbers.length > 0) {
+          const existingByInvoice = await prisma.bill.findMany({
+            where: { deletedAt: null, invoiceNumber: { in: invoiceNumbers } },
+            select: {
+              id: true,
+              clientId: true,
+              status: true,
+              amount: true,
+              subtotal: true,
+              invoiceNumber: true,
+              dueDate: true,
+              paidAt: true,
+              submittedAt: true,
+              approvedAt: true,
+              avazaUpdatedAt: true,
+            },
+          })
+          for (const row of existingByInvoice) {
+            if (row.invoiceNumber) existingByInvoiceNumber.set(row.invoiceNumber, row)
+          }
+        }
+
+        for (const { mapped } of mappedBatch) {
         try {
           const linkedClientId = mapped.partyExternalId ? clientMap.get(mapped.partyExternalId) : undefined
-          const existing = await prisma.bill.findFirst({
-            where: {
-              OR: [
-                { avazaExternalId: mapped.avazaExternalId },
-                mapped.invoiceNumber ? { invoiceNumber: mapped.invoiceNumber } : undefined,
-              ].filter(Boolean) as any,
-              deletedAt: null,
-            },
-            select: { id: true },
-          })
+          const existing =
+            existingByExternalId.get(mapped.avazaExternalId) ||
+            (mapped.invoiceNumber ? existingByInvoiceNumber.get(mapped.invoiceNumber) : undefined)
           if (!dryRun) {
             const data = {
               createdBy,
@@ -259,8 +367,12 @@ export async function runAvazaSync(options: RunOptions = {}) {
               avazaUpdatedAt: mapped.avazaUpdatedAt,
             }
             if (existing) {
-              await prisma.bill.update({ where: { id: existing.id }, data })
-              updatedCount++
+              if (billNeedsUpdate(existing, mapped, linkedClientId ?? null)) {
+                await prisma.bill.update({ where: { id: existing.id }, data })
+                updatedCount++
+              } else {
+                skippedCount++
+              }
             } else {
               await prisma.bill.create({ data })
               createdCount++
@@ -291,6 +403,17 @@ export async function runAvazaSync(options: RunOptions = {}) {
             createdCount,
             updatedCount,
             failedCount,
+            detailsJson: JSON.stringify({
+              requestedStart: requestedStart?.toISOString() ?? null,
+              requestedEnd: requestedEnd?.toISOString() ?? null,
+              effectiveStart: updatedSince.toISOString(),
+              defaultStart: DEFAULT_SYNC_START.toISOString(),
+              effectiveEnd: effectiveEnd.toISOString(),
+              chunkDays,
+              chunkCount,
+              truncated,
+              skippedCount,
+            }),
           },
         })
       }
@@ -332,6 +455,7 @@ export async function runAvazaSync(options: RunOptions = {}) {
           chunkDays,
           chunkCount,
           truncated,
+          skippedCount,
         }),
       },
     })
@@ -349,6 +473,7 @@ export async function runAvazaSync(options: RunOptions = {}) {
       requestedEnd: requestedEnd?.toISOString() ?? null,
       defaultStart: DEFAULT_SYNC_START.toISOString(),
       truncated,
+      skippedCount,
     }
   } catch (error: any) {
     await prisma.integrationSyncRun.update({
