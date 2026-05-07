@@ -15,6 +15,7 @@ const DEFAULT_SYNC_START = new Date("2026-01-01T00:00:00.000Z")
 const DEFAULT_DB_BATCH_SIZE = 200
 const DEFAULT_INVOICE_PAGE_SIZE = 100
 const DEFAULT_MAX_PAGES_PER_RUN = 8
+const DEFAULT_MAX_RUNTIME_MS = 8_000
 
 function clampToValidDate(d: Date | null | undefined): Date | null {
   if (!d) return null
@@ -104,6 +105,9 @@ export async function runAvazaSync(options: RunOptions = {}) {
   })
 
   try {
+    const deadlineAt = Date.now() + Number(process.env.AVAZA_SYNC_MAX_RUNTIME_MS ?? DEFAULT_MAX_RUNTIME_MS)
+    const hasTimeBudgetRemaining = () => Date.now() < deadlineAt
+
     const state = await prisma.integrationSyncState.findUnique({
       where: { provider_scope: { provider: "avaza", scope: "clients_invoices" } },
     })
@@ -119,8 +123,8 @@ export async function runAvazaSync(options: RunOptions = {}) {
       )
     )
 
-    // Fetch clients once (smaller cardinality); chunk invoices during writes to avoid timeouts.
-    const parties = await client.listClients(updatedSince)
+    // For manual windows, skip upstream client sync to keep invocation small and use existing local mapping.
+    const parties = hasManualWindow ? [] : await client.listClients(updatedSince)
     const effectiveEnd = clampToValidDate(requestedEnd) ?? new Date()
 
     let createdCount = 0
@@ -174,7 +178,19 @@ export async function runAvazaSync(options: RunOptions = {}) {
     const createdBy = await resolveCreatedByUserId(prisma as unknown as PrismaClient)
     const clientMap = new Map<string, string>()
 
+    const localAvazaClients = await prisma.client.findMany({
+      where: { deletedAt: null, avazaExternalId: { not: null } },
+      select: { id: true, avazaExternalId: true },
+    })
+    for (const c of localAvazaClients) {
+      if (c.avazaExternalId) clientMap.set(c.avazaExternalId, c.id)
+    }
+
     for (const p of parties) {
+      if (!hasTimeBudgetRemaining()) {
+        truncated = true
+        break
+      }
       const mapped = mapPartyToClient(p)
       try {
         const existing = await prisma.client.findFirst({
@@ -247,6 +263,10 @@ export async function runAvazaSync(options: RunOptions = {}) {
     let pagesProcessed = 0
     let totalPages = 1
     while (page <= totalPages) {
+      if (!hasTimeBudgetRemaining()) {
+        truncated = true
+        break
+      }
       const pagePayload = await client.listInvoicesPage(updatedSince, page, Math.max(1, invoicePageSize))
       const currentPageSize = Math.max(1, pagePayload.pageSize)
       totalPages = Math.max(1, Math.ceil(pagePayload.totalCount / currentPageSize))
@@ -262,6 +282,10 @@ export async function runAvazaSync(options: RunOptions = {}) {
         })
 
       for (let i = 0; i < filteredInvoices.length; i += Math.max(1, dbBatchSize)) {
+        if (!hasTimeBudgetRemaining()) {
+          truncated = true
+          break
+        }
         const batch = filteredInvoices.slice(i, i + Math.max(1, dbBatchSize))
         const mappedBatch = batch.map(({ inv }) => ({ inv, mapped: mapInvoice(inv) }))
         const externalIds = mappedBatch.map(({ mapped }) => mapped.avazaExternalId)
@@ -430,7 +454,7 @@ export async function runAvazaSync(options: RunOptions = {}) {
         })
       }
 
-      if (pagesProcessed >= Math.max(1, maxPagesPerRun) && page < totalPages) {
+      if (truncated || (pagesProcessed >= Math.max(1, maxPagesPerRun) && page < totalPages)) {
         truncated = true
         break
       }
