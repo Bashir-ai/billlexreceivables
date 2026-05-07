@@ -10,11 +10,40 @@ type RunOptions = {
 }
 
 const DEFAULT_SYNC_START = new Date("2026-01-01T00:00:00.000Z")
+const DEFAULT_CHUNK_DAYS = 30
+const DEFAULT_DB_BATCH_SIZE = 200
+
+function clampToValidDate(d: Date | null | undefined): Date | null {
+  if (!d) return null
+  const t = d.getTime()
+  return Number.isNaN(t) ? null : d
+}
+
+function toChunkedEnd(start: Date, chunkDays: number, endExclusive: Date): Date {
+  const ms = chunkDays * 24 * 60 * 60 * 1000
+  const candidate = new Date(start.getTime() + ms)
+  return candidate.getTime() < endExclusive.getTime() ? candidate : endExclusive
+}
 
 function parseDate(value?: string | null): Date | null {
   if (!value) return null
   const d = new Date(value)
   return Number.isNaN(d.getTime()) ? null : d
+}
+
+function resolveInvoiceCandidateDate(inv: {
+  issue_date?: string
+  updated_at?: string
+  paid_date?: string
+  paid_at?: string
+}): Date | null {
+  const issue = inv.issue_date ? new Date(inv.issue_date) : null
+  const paid = inv.paid_date ? new Date(inv.paid_date) : inv.paid_at ? new Date(inv.paid_at) : null
+  const updated = inv.updated_at ? new Date(inv.updated_at) : null
+  if (issue && !Number.isNaN(issue.getTime())) return issue
+  if (updated && !Number.isNaN(updated.getTime())) return updated
+  if (paid && !Number.isNaN(paid.getTime())) return paid
+  return null
 }
 
 async function resolveCreatedByUserId(db: PrismaClient): Promise<string> {
@@ -53,14 +82,56 @@ export async function runAvazaSync(options: RunOptions = {}) {
       )
     )
 
-    const [parties, invoices] = await Promise.all([
-      client.listClients(updatedSince),
-      client.listInvoices(updatedSince),
-    ])
+    // Fetch clients once (smaller cardinality); chunk invoices during writes to avoid timeouts.
+    const parties = await client.listClients(updatedSince)
+    const effectiveEnd = clampToValidDate(requestedEnd) ?? new Date()
 
     let createdCount = 0
     let updatedCount = 0
     let failedCount = 0
+    let fetchedInvoicesCount = 0
+    let chunkCount = 0
+    let truncated = false
+    const chunkDays = Number(process.env.AVAZA_SYNC_CHUNK_DAYS ?? DEFAULT_CHUNK_DAYS)
+    const maxChunks = Number(process.env.AVAZA_SYNC_MAX_CHUNKS ?? 24)
+    const dbBatchSize = Number(process.env.AVAZA_SYNC_DB_BATCH_SIZE ?? DEFAULT_DB_BATCH_SIZE)
+
+    // If end is before start (or equal), treat as a no-op.
+    if (effectiveEnd.getTime() < updatedSince.getTime()) {
+      await prisma.integrationSyncRun.update({
+        where: { id: run.id },
+        data: {
+          finishedAt: new Date(),
+          success: true,
+          fetchedCount: parties.length,
+          createdCount,
+          updatedCount,
+          failedCount,
+          detailsJson: JSON.stringify({
+            requestedStart: requestedStart?.toISOString() ?? null,
+            requestedEnd: requestedEnd?.toISOString() ?? null,
+            effectiveStart: updatedSince.toISOString(),
+            effectiveEnd: effectiveEnd.toISOString(),
+            chunkDays,
+            chunkCount: 0,
+          }),
+        },
+      })
+      return {
+        success: true,
+        fetchedCount: parties.length,
+        createdCount,
+        updatedCount,
+        failedCount,
+        startedAt: startedAt.toISOString(),
+        dryRun,
+        effectiveStart: updatedSince.toISOString(),
+        requestedStart: requestedStart?.toISOString() ?? null,
+        requestedEnd: requestedEnd?.toISOString() ?? null,
+        defaultStart: DEFAULT_SYNC_START.toISOString(),
+        truncated,
+      }
+    }
 
     const createdBy = await resolveCreatedByUserId(prisma as unknown as PrismaClient)
     const clientMap = new Map<string, string>()
@@ -114,75 +185,129 @@ export async function runAvazaSync(options: RunOptions = {}) {
       }
     }
 
-    const filteredInvoices = invoices.filter((inv) => {
-      const issue = inv.issue_date ? new Date(inv.issue_date) : null
-      const paid = inv.paid_date ? new Date(inv.paid_date) : inv.paid_at ? new Date(inv.paid_at) : null
-      const updated = inv.updated_at ? new Date(inv.updated_at) : null
-      const candidate = issue && !Number.isNaN(issue.getTime())
-        ? issue
-        : updated && !Number.isNaN(updated.getTime())
-          ? updated
-          : paid && !Number.isNaN(paid.getTime())
-            ? paid
-            : null
-      if (!candidate) return true
-      if (candidate.getTime() < updatedSince.getTime()) return false
-      if (requestedEnd && candidate.getTime() > requestedEnd.getTime()) return false
-      return true
+    // Fetch invoices once, then process in local time chunks.
+    // This avoids repeated "UpdatedSince=chunkStart" full scans that can hit function timeouts.
+    const allInvoices = await client.listInvoices(updatedSince)
+    fetchedInvoicesCount = allInvoices.length
+
+    const invoicesWithCandidate = allInvoices
+      .map((inv) => ({ inv, candidate: resolveInvoiceCandidateDate(inv) }))
+      .filter(({ candidate }) => {
+        if (!candidate) return true
+        if (candidate.getTime() < updatedSince.getTime()) return false
+        if (candidate.getTime() > effectiveEnd.getTime()) return false
+        return true
+      })
+
+    const sortedInvoices = invoicesWithCandidate.sort((a, b) => {
+      const at = a.candidate?.getTime() ?? updatedSince.getTime()
+      const bt = b.candidate?.getTime() ?? updatedSince.getTime()
+      return at - bt
     })
 
-    for (const inv of filteredInvoices) {
-      const mapped = mapInvoice(inv)
-      try {
-        const linkedClientId = mapped.partyExternalId ? clientMap.get(mapped.partyExternalId) : undefined
-        const existing = await prisma.bill.findFirst({
-          where: {
-            OR: [
-              { avazaExternalId: mapped.avazaExternalId },
-              mapped.invoiceNumber ? { invoiceNumber: mapped.invoiceNumber } : undefined,
-            ].filter(Boolean) as any,
-            deletedAt: null,
-          },
-          select: { id: true },
-        })
-        if (!dryRun) {
-          const data = {
-            createdBy,
-            clientId: linkedClientId ?? null,
-            leadId: null,
-            status: mapped.status,
-            amount: mapped.amount,
-            subtotal: mapped.subtotal,
-            invoiceNumber: mapped.invoiceNumber,
-            dueDate: mapped.dueDate,
-            paidAt: mapped.status === BillStatus.PAID ? mapped.paidAt : null,
-            submittedAt: mapped.submittedAt,
-            approvedAt: mapped.approvedAt,
-            avazaExternalId: mapped.avazaExternalId,
-            avazaUpdatedAt: mapped.avazaUpdatedAt,
-          }
-          if (existing) {
-            await prisma.bill.update({ where: { id: existing.id }, data })
-            updatedCount++
-          } else {
-            await prisma.bill.create({ data })
-            createdCount++
-          }
-        }
-      } catch {
-        failedCount++
+    let cursorStart = new Date(updatedSince)
+    let lastChunkEnd = cursorStart
+    while (cursorStart.getTime() < effectiveEnd.getTime()) {
+      chunkCount++
+      if (chunkCount > maxChunks) {
+        truncated = true
+        break
       }
+
+      const chunkStart = new Date(cursorStart)
+      const chunkEndExclusive = toChunkedEnd(chunkStart, chunkDays, effectiveEnd)
+      lastChunkEnd = new Date(chunkEndExclusive)
+
+      const filteredInvoices = sortedInvoices.filter(({ candidate }) => {
+        if (!candidate) return chunkStart.getTime() === updatedSince.getTime()
+        return candidate.getTime() >= chunkStart.getTime() && candidate.getTime() < chunkEndExclusive.getTime()
+      })
+
+      for (let i = 0; i < filteredInvoices.length; i += Math.max(1, dbBatchSize)) {
+        const batch = filteredInvoices.slice(i, i + Math.max(1, dbBatchSize))
+        for (const { inv } of batch) {
+        const mapped = mapInvoice(inv)
+        try {
+          const linkedClientId = mapped.partyExternalId ? clientMap.get(mapped.partyExternalId) : undefined
+          const existing = await prisma.bill.findFirst({
+            where: {
+              OR: [
+                { avazaExternalId: mapped.avazaExternalId },
+                mapped.invoiceNumber ? { invoiceNumber: mapped.invoiceNumber } : undefined,
+              ].filter(Boolean) as any,
+              deletedAt: null,
+            },
+            select: { id: true },
+          })
+          if (!dryRun) {
+            const data = {
+              createdBy,
+              clientId: linkedClientId ?? null,
+              leadId: null,
+              status: mapped.status,
+              amount: mapped.amount,
+              subtotal: mapped.subtotal,
+              invoiceNumber: mapped.invoiceNumber,
+              dueDate: mapped.dueDate,
+              paidAt: mapped.status === BillStatus.PAID ? mapped.paidAt : null,
+              submittedAt: mapped.submittedAt,
+              approvedAt: mapped.approvedAt,
+              avazaExternalId: mapped.avazaExternalId,
+              avazaUpdatedAt: mapped.avazaUpdatedAt,
+            }
+            if (existing) {
+              await prisma.bill.update({ where: { id: existing.id }, data })
+              updatedCount++
+            } else {
+              await prisma.bill.create({ data })
+              createdCount++
+            }
+          }
+        } catch {
+          failedCount++
+        }
+      }
+      }
+
+      // Advance the checkpoint per chunk so the next run doesn't redo everything we already processed.
+      if (!dryRun) {
+        await prisma.integrationSyncState.upsert({
+          where: { provider_scope: { provider: "avaza", scope: "clients_invoices" } },
+          create: {
+            provider: "avaza",
+            scope: "clients_invoices",
+            lastSyncedAt: lastChunkEnd,
+          },
+          update: { lastSyncedAt: lastChunkEnd },
+        })
+
+        await prisma.integrationSyncRun.update({
+          where: { id: run.id },
+          data: {
+            fetchedCount: parties.length + fetchedInvoicesCount,
+            createdCount,
+            updatedCount,
+            failedCount,
+          },
+        })
+      }
+
+      // Move to next chunk (exclusive end to prevent overlaps).
+      cursorStart = new Date(chunkEndExclusive.getTime() + 1)
+      // Avoid infinite loops if clock skew / weird inputs.
+      if (cursorStart.getTime() <= chunkStart.getTime()) break
     }
 
     if (!dryRun) {
+      // State is advanced per chunk above. This is a final safety update for cases where no chunk ran.
       await prisma.integrationSyncState.upsert({
         where: { provider_scope: { provider: "avaza", scope: "clients_invoices" } },
         create: {
           provider: "avaza",
           scope: "clients_invoices",
-          lastSyncedAt: new Date(),
+          lastSyncedAt: lastChunkEnd,
         },
-        update: { lastSyncedAt: new Date() },
+        update: { lastSyncedAt: lastChunkEnd },
       })
     }
 
@@ -191,7 +316,7 @@ export async function runAvazaSync(options: RunOptions = {}) {
       data: {
         finishedAt: new Date(),
         success: true,
-        fetchedCount: parties.length + filteredInvoices.length,
+        fetchedCount: parties.length + fetchedInvoicesCount,
         createdCount,
         updatedCount,
         failedCount,
@@ -200,13 +325,17 @@ export async function runAvazaSync(options: RunOptions = {}) {
           requestedEnd: requestedEnd?.toISOString() ?? null,
           effectiveStart: updatedSince.toISOString(),
           defaultStart: DEFAULT_SYNC_START.toISOString(),
+          effectiveEnd: effectiveEnd.toISOString(),
+          chunkDays,
+          chunkCount,
+          truncated,
         }),
       },
     })
 
     return {
       success: true,
-      fetchedCount: parties.length + filteredInvoices.length,
+      fetchedCount: parties.length + fetchedInvoicesCount,
       createdCount,
       updatedCount,
       failedCount,
@@ -216,6 +345,7 @@ export async function runAvazaSync(options: RunOptions = {}) {
       requestedStart: requestedStart?.toISOString() ?? null,
       requestedEnd: requestedEnd?.toISOString() ?? null,
       defaultStart: DEFAULT_SYNC_START.toISOString(),
+      truncated,
     }
   } catch (error: any) {
     await prisma.integrationSyncRun.update({
