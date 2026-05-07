@@ -399,6 +399,7 @@ export async function GET(
         /** Same basis as compensation: user's share on client-paid invoices in the reporting window */
         realizedAttributed: realizedAttribution,
         billsMissingAttribution: outstandingAttribution.billsWithoutSnapshot,
+        billsUsingFallbackAttribution: outstandingAttribution.billsUsingFallback,
         reportingPeriod: {
           from: periodFrom.toISOString(),
           to: periodTo.toISOString(),

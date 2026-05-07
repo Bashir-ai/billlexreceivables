@@ -687,8 +687,8 @@ export default function AccountsPage() {
             typeof accountsSummary?.receivables?.billsMissingAttribution === "number" &&
             accountsSummary.receivables.billsMissingAttribution > 0 ? (
               <p className="text-xs text-amber-800 mt-2">
-                {accountsSummary.receivables.billsMissingAttribution} unpaid invoice(s) have no attribution snapshot yet,
-                so they are excluded from this total.
+                {accountsSummary.receivables.billsMissingAttribution} unpaid invoice(s) have no attribution snapshot yet.
+                They are calculated using current client finder/manager rules where available.
               </p>
             ) : null}
           </CardContent>
@@ -803,8 +803,11 @@ export default function AccountsPage() {
                 {typeof accountsSummary?.receivables?.billsMissingAttribution === "number" &&
                 accountsSummary.receivables.billsMissingAttribution > 0 ? (
                   <span className="text-amber-700">
-                    {accountsSummary.receivables.billsMissingAttribution} invoice(s) lack attribution snapshots
-                    and are excluded.
+                    {accountsSummary.receivables.billsMissingAttribution} invoice(s) lack attribution snapshots.
+                    Fallback client finder/manager rules are used where available
+                    {typeof accountsSummary?.receivables?.billsUsingFallbackAttribution === "number"
+                      ? ` (${accountsSummary.receivables.billsUsingFallbackAttribution} currently resolved).`
+                      : "."}
                   </span>
                 ) : null}
               </CardDescription>

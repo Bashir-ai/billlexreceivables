@@ -40,6 +40,16 @@ export async function supportsAttributionSnapshots(): Promise<boolean> {
   }
 }
 
+function supportsClientManagementSplits(): boolean {
+  try {
+    const model = (prisma as any)?._runtimeDataModel?.models?.Client
+    const fields = model?.fields
+    return Array.isArray(fields) && fields.some((f: any) => f?.name === "managementSplits")
+  } catch {
+    return false
+  }
+}
+
 export type UserAttributionBreakdown = {
   total: number
   finder: number
@@ -59,11 +69,13 @@ export async function aggregateOutstandingAttributionByUser(options?: {
 }): Promise<{
   byUserId: Record<string, UserAttributionBreakdown>
   billsWithoutSnapshot: number
+  billsUsingFallback: number
 }> {
   const snapOk = await supportsAttributionSnapshots()
   if (!snapOk) {
-    return { byUserId: {}, billsWithoutSnapshot: 0 }
+    return { byUserId: {}, billsWithoutSnapshot: 0, billsUsingFallback: 0 }
   }
+  const includeManagementSplits = supportsClientManagementSplits()
 
   const bills = await prisma.bill.findMany({
     where: {
@@ -80,6 +92,7 @@ export async function aggregateOutstandingAttributionByUser(options?: {
     },
     select: {
       id: true,
+      clientId: true,
       amount: true,
       subtotal: true,
       discountPercent: true,
@@ -106,6 +119,37 @@ export async function aggregateOutstandingAttributionByUser(options?: {
 
   const byUserId: Record<string, UserAttributionBreakdown> = {}
   let billsWithoutSnapshot = 0
+  let billsUsingFallback = 0
+
+  const missingSnapshotClientIds = Array.from(
+    new Set(
+      bills
+        .filter((bill) => !(bill.attributionSnapshots[0]?.rows?.length))
+        .map((bill) => bill.clientId)
+        .filter((v): v is string => Boolean(v))
+    )
+  )
+  const clientRulesRows =
+    missingSnapshotClientIds.length > 0
+      ? await prisma.client.findMany({
+          where: { id: { in: missingSnapshotClientIds }, deletedAt: null },
+          select: {
+            id: true,
+            clientManagerId: true,
+            finders: {
+              select: { userId: true, finderFeePercent: true },
+            },
+            ...(includeManagementSplits
+              ? {
+                  managementSplits: {
+                    select: { userId: true, role: true, splitPercent: true, fixedAmount: true },
+                  },
+                }
+              : {}),
+          } as any,
+        })
+      : []
+  const clientRulesById = new Map(clientRulesRows.map((row: any) => [String(row.id), row]))
 
   const ensure = (userId: string): UserAttributionBreakdown => {
     if (!byUserId[userId]) {
@@ -116,9 +160,61 @@ export async function aggregateOutstandingAttributionByUser(options?: {
 
   for (const bill of bills) {
     const snap = bill.attributionSnapshots[0]
-    if (!snap?.rows?.length) {
+    let rows: Array<{
+      userId: string
+      role: BillAttributionRole
+      splitPercent: number
+      fixedAmount: number | null
+    }> = []
+    if (snap?.rows?.length) {
+      rows = snap.rows.map((row) => ({
+        userId: row.userId,
+        role: row.role,
+        splitPercent: row.splitPercent || 0,
+        fixedAmount: row.fixedAmount ?? null,
+      }))
+    } else {
       billsWithoutSnapshot++
-      continue
+      const rules = bill.clientId ? clientRulesById.get(bill.clientId) : null
+      if (!rules) continue
+      const managementSplits: Array<{
+        userId: string
+        role: "CLIENT_MANAGER" | "PROJECT_MANAGER"
+        splitPercent: number
+        fixedAmount: number | null
+      }> = Array.isArray((rules as any).managementSplits) ? (rules as any).managementSplits : []
+      const hasClientManagerSplit = managementSplits.some((m) => m.role === "CLIENT_MANAGER")
+
+      const derivedRows: typeof rows = [
+        ...((rules.finders || []) as Array<{ userId: string; finderFeePercent: number }>).map((finder) => ({
+          userId: finder.userId,
+          role: BillAttributionRole.FINDER,
+          splitPercent: finder.finderFeePercent || 0,
+          fixedAmount: null,
+        })),
+        ...managementSplits.map((split) => ({
+          userId: split.userId,
+          role:
+            split.role === "CLIENT_MANAGER"
+              ? BillAttributionRole.CLIENT_MANAGER
+              : BillAttributionRole.PROJECT_MANAGER,
+          splitPercent: split.splitPercent || 0,
+          fixedAmount: split.fixedAmount ?? null,
+        })),
+      ]
+
+      if (!hasClientManagerSplit && rules.clientManagerId) {
+        derivedRows.push({
+          userId: rules.clientManagerId,
+          role: BillAttributionRole.CLIENT_MANAGER,
+          splitPercent: 100,
+          fixedAmount: null,
+        })
+      }
+
+      rows = derivedRows
+      if (!rows.length) continue
+      billsUsingFallback++
     }
 
     const basisAmount = computeInvoiceNetAmountSync({
@@ -132,7 +228,7 @@ export async function aggregateOutstandingAttributionByUser(options?: {
       { total: number; finder: number; management: number }
     >()
 
-    for (const row of snap.rows) {
+    for (const row of rows) {
       const share = attributedShareForRow(basisAmount, row)
       if (share <= 0) continue
 
@@ -159,7 +255,7 @@ export async function aggregateOutstandingAttributionByUser(options?: {
     }
   }
 
-  return { byUserId, billsWithoutSnapshot }
+  return { byUserId, billsWithoutSnapshot, billsUsingFallback }
 }
 
 /** Realized (client paid firm) attributed amounts for one user in a paidAt window. */
